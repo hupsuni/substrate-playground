@@ -9,5 +9,5 @@
   "devDependencies": {
     "lerna": "4.0.0"
   },
-  "workspaces": ["theia-playground-extension", "theia-playground"]
+  "workspaces": ["theia-github-authentication-plugin", "theia-playground-extension", "theia-playground"]
 }
