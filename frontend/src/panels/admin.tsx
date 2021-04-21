@@ -95,8 +95,8 @@ export function canCustomize(user: LoggedUser): boolean {
 export function SessionCreationDialog({ client, conf, sessions, user, template, templates, show, onCreate, onHide, allowUserSelection = false }: { client: Client, conf: Configuration, sessions?: Record<string, Session>, user: LoggedUser, template?: string, templates: Record<string, Template> | null, show: boolean, onCreate: (conf: SessionConfiguration, id?: string, ) => void, onHide: () => void , allowUserSelection?: boolean}): JSX.Element {
     const [selectedUser, setUser] = React.useState<string | null>(user.id);
     const [selectedTemplate, setTemplate] = React.useState<string | null>(null);
-    const [duration, setDuration] = React.useState(conf.sessionDefaults.duration);
-    const [poolAffinity, setPoolAffinity] = React.useState(conf.sessionDefaults.poolAffinity);
+    const [duration, setDuration] = React.useState(conf.session.duration);
+    const [poolAffinity, setPoolAffinity] = React.useState(conf.session.poolAffinity);
     const [pools, setPools] = useState<Record<string, Pool> | null>(null);
     const [users, setUsers] = useState<Record<string, User> | null>(null);
 
@@ -197,7 +197,7 @@ export function SessionCreationDialog({ client, conf, sessions, user, template, 
                         label="Duration"
                         />}
                     <ButtonGroup style={{alignSelf: "flex-end", marginTop: 20}} size="small">
-                        <Button disabled={!valid()} onClick={() => {onCreate({template: currentTemplate, duration: duration, poolAffinity: poolAffinity}, currentUser); onHide();}}>CREATE</Button>
+                        <Button disabled={!valid()} onClick={() => {onCreate({template: currentTemplate || "", duration: duration, poolAffinity: poolAffinity}, currentUser); onHide();}}>CREATE</Button>
                         <Button onClick={onHide}>CLOSE</Button>
                     </ButtonGroup>
                 </Container>
@@ -329,10 +329,18 @@ function Sessions({ client, conf, user }: { client: Client, conf: Configuration,
     }, 5000);
 
     function sessionMock(conf: SessionConfiguration): Session {
-        return {duration: conf.duration || 0, template: {name: "", image: "", description: ""}, userId: "", url: "", pod: {phase: 'Pending', reason: "", message: ""}};
+        return {
+            duration: conf.duration || 0,
+            maxDuration: 0,
+            template: {name: "", image: "", description: ""},
+            userId: "",
+            url: "",
+            pod: {phase: 'Pending', reason: "", message: ""},
+            node: ""
+        };
     }
 
-    async function onCreate(conf: SessionConfiguration, id: string | null, setSessions: Dispatch<SetStateAction<Record<string, Session> | null>>): Promise<void> {
+    async function onCreate(conf: SessionConfiguration, id: string | null | undefined, setSessions: Dispatch<SetStateAction<Record<string, Session> | null>>): Promise<void> {
         try {
             if (id) {
                 await client.createSession(id, conf);
@@ -635,7 +643,7 @@ function EnhancedTableToolbar({ user, label, selected = null, onCreate, onUpdate
 function UserCreationDialog({ client, conf, users, show, onCreate, onHide }: { client: Client, conf: Configuration, users: Record<string, User>, show: boolean, onCreate: (id: string, conf: UserConfiguration) => void, onHide: () => void }): JSX.Element {
     const [id, setID] = React.useState('');
     const [adminChecked, setAdminChecked] = React.useState(false);
-    const [poolAffinity, setPoolAffinity] = React.useState<string>(conf.sessionDefaults.poolAffinity);
+    const [poolAffinity, setPoolAffinity] = React.useState<string>(conf.session.poolAffinity);
     const [customizeDurationChecked, setCustomizeDurationChecked] = React.useState(false);
     const [customizePoolAffinityChecked, setCustomizePoolAffinityChecked] = React.useState(false);
     const [pools, setPools] = useState<Record<string, Pool> | null>(null);
@@ -808,7 +816,7 @@ function Users({ client, user, conf }: { client: Client, user: LoggedUser, conf:
             await client.createUser(id, conf);
             setUsers((users: Record<string, User> | null) => {
                 if (users) {
-                    users[id] = conf;
+                    users[id] = updatedUserMock(conf);
                 }
                 return {...users};
             });
@@ -818,8 +826,8 @@ function Users({ client, user, conf }: { client: Client, user: LoggedUser, conf:
         }
     }
 
-    function updatedUserMock(user: User, conf: UserUpdateConfiguration): User {
-        return {admin: conf.admin, poolAffinity: user.poolAffinity, canCustomizeDuration: conf.canCustomizeDuration, canCustomizePoolAffinity: user.canCustomizePoolAffinity};
+    function updatedUserMock(conf: UserUpdateConfiguration, user?: User): User {
+        return {admin: conf.admin, poolAffinity: user?.poolAffinity || "", canCustomizeDuration: conf.canCustomizeDuration, canCustomizePoolAffinity: user?.canCustomizePoolAffinity || false};
     }
 
     async function onUpdate(id: string, conf: UserUpdateConfiguration, setUsers: Dispatch<SetStateAction<Record<string, User> | null>>): Promise<void> {
@@ -827,7 +835,7 @@ function Users({ client, user, conf }: { client: Client, user: LoggedUser, conf:
             await client.updateUser(id, conf);
             setUsers((users: Record<string, User> | null) => {
                 if (users) {
-                    users[id] = updatedUserMock(users[id], conf);
+                    users[id] = updatedUserMock(conf, users[id]);
                 }
                 return {...users};
             });
@@ -920,7 +928,7 @@ function Users({ client, user, conf }: { client: Client, user: LoggedUser, conf:
 
 function DetailsPanel({ conf }: { conf: Configuration }): JSX.Element {
     const classes = useStyles();
-    const { duration, maxSessionsPerPod, poolAffinity } = conf.sessionDefaults;
+    const { duration, maxSessionsPerPod, poolAffinity } = conf.session;
     return (
         <Container>
             <Typography variant="h6" id="tableTitle" component="div">

@@ -23,48 +23,31 @@ import { useInterval } from './hooks';
 import { Params } from "./index";
 import { hasAdminReadRights } from './utils';
 
-function wrapAction(action: (() => void) | Promise<void>, call: (_: boolean) => void): (() => void) | Promise<void> {
-    if (action instanceof Promise) {
-        call(true);
-        return new Promise<void>((resolve, reject) => {
-            action.then(() => {
-                resolve();
-            }).catch(() => {
-                reject();
-            }).finally(() => {
-                call(false);
-            });
-        });
-    }
-    return action;
+function ErrorMessageAction({action, actionTitle = "TRY AGAIN"}: {action: (() => void) | (() => Promise<void>), actionTitle?: string}): JSX.Element {
+    const [executing, setExecuting] = useState(false);
+    return (
+        <Button disabled={executing}
+                onClick={() => {
+                    const res = action();
+                    if (res instanceof Promise) {
+                        setExecuting(true);
+                        res.finally(() => setExecuting(false));
+                    }
+                }}>
+            {executing &&
+              <CircularProgress style={{marginRight: 10}} size={20} />}
+            {actionTitle}
+        </Button>
+    );
 }
 
-function ErrorMessageAction({action, actionTitle = "TRY AGAIN"}: {action: (() => void) | Promise<void> , actionTitle?: string}): JSX.Element {
-    if (action instanceof Promise) {
-        const [executing, setExecuting] = useState(false);
-        return (
-            <Button onClick={async () => {wrapAction(action, setExecuting)}}>
-                {executing &&
-                <CircularProgress size={20} />}
-                {actionTitle}
-            </Button>
-        );
-    } else {
-        return (
-            <Button onClick={action}>
-                {actionTitle}
-            </Button>
-        );
-    }
-}
-
-export function ErrorMessage({ title = "Oops! Looks like something went wrong :(", reason, action, actionTitle }: { title?: string, reason?: string, action: (() => void) | Promise<void> , actionTitle?: string}): JSX.Element {
+export function ErrorMessage({ title = "Oops! Looks like something went wrong :(", reason, action, actionTitle }: { title?: string, reason?: string, action: (() => void) | (() => Promise<void>), actionTitle?: string}): JSX.Element {
     return (
         <Alert severity="error" style={{ margin: 20, alignItems: "center" }}
             action={<ErrorMessageAction action={action} actionTitle={actionTitle} />}>
             <AlertTitle style={{margin: "unset"}}>{title}</AlertTitle>
             {reason &&
-            <Box component="span" display="block">{reason}</Box>}
+              <Box component="span" display="block">{reason}</Box>}
         </Alert>
     );
 }
@@ -120,13 +103,13 @@ function Phase({ value }: { value: string }): JSX.Element {
 
 export function Loading({ phase, retry = 0 }: { phase?: string, retry?: number }): JSX.Element {
     const [phrase, setPhrase] = useState(loadingPhrases[0]);
-    const [props, set] = useSpring(() => ({ opacity: 1 }));
+    const [props, spring] = useSpring(() => ({ opacity: 1 }));
 
     useInterval(() => {
-        set({ opacity: 0 });
+        spring.update({ opacity: 0 });
 
         setTimeout(function () { setPhrase(loadingPhrases[Math.floor(Math.random() * loadingPhrases.length)]); }, 500);
-        setTimeout(function () { set({ opacity: 1 }); }, 1000);
+        setTimeout(function () { spring.update({ opacity: 1 }); }, 1000);
     }, 3000);
 
     return (
@@ -135,20 +118,21 @@ export function Loading({ phase, retry = 0 }: { phase?: string, retry?: number }
             <animated.h1 style={props}>{phrase}</animated.h1>
             {(retry > 10) &&
                 <div>It looks like it takes longer than expected to load. Please be patient :)</div>}
-            {phase &&
-                <Phase value={phase} />}
+            {phase
+              ? <Phase value={phase} />
+              : <CircularProgress size={20} />}
         </div>
     );
 }
 
 function Nav({ conf, onPlayground, onStatsClick, onAdminClick, onLogout, user, children }: { conf: Configuration, onPlayground: () => void, onStatsClick: () => void, onAdminClick: () => void, onLogout: () => void, user?: LoggedUser, children?: React.ReactElement }): JSX.Element  {
-    const [anchorEl, setAnchorEl] = React.useState(null);
+    const [anchorEl, setAnchorEl] = React.useState<null | HTMLElement>(null);
     const open = Boolean(anchorEl);
-    const handleMenu = (event) => setAnchorEl(event.currentTarget);
+    const handleMenu = (event: React.MouseEvent<HTMLElement>) => setAnchorEl(event.currentTarget);
     const handleClose = () => setAnchorEl(null);
-    const [anchorElAdmin, setAnchorElAdmin] = React.useState(null);
+    const [anchorElAdmin, setAnchorElAdmin] = React.useState<null | HTMLElement>(null);
     const openAdmin = Boolean(anchorElAdmin);
-    const handleMenuAdmin = (event) => setAnchorElAdmin(event.currentTarget);
+    const handleMenuAdmin = (event: React.MouseEvent<HTMLElement>) => setAnchorElAdmin(event.currentTarget);
     const handleCloseAdmin = () => setAnchorElAdmin(null);
     return (
         <AppBar position="sticky">
@@ -199,7 +183,7 @@ function Nav({ conf, onPlayground, onStatsClick, onAdminClick, onLogout, user, c
                          color="inherit"
                          size="small"
                      >
-                         <Avatar alt={user.id} src={user.avatar} />
+                         <Avatar alt={user.id} src={`https://github.com/${user.id}.png`} />
                      </IconButton>
                      <Menu
                          id="menu-appbar"

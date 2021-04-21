@@ -1,5 +1,5 @@
 import { fetchWithTimeout, rpc } from './rpc';
-import { Playground, Pool, Session, SessionConfiguration, SessionUpdateConfiguration, User, UserConfiguration, UserUpdateConfiguration, } from './types';
+import { Playground, Pool, Session, SessionConfiguration, SessionUpdateConfiguration, Template, User, UserConfiguration, UserUpdateConfiguration, } from './types';
 
 export class Client {
 
@@ -7,6 +7,7 @@ export class Client {
     static usersResource = 'users';
     static sessionResource = 'session';
     static sessionsResource = 'sessions';
+    static templatesResource = 'templates';
     static poolsResource = 'pools';
 
     private readonly base: string;
@@ -19,8 +20,12 @@ export class Client {
         this.timeout = timeout;
     }
 
-    path(...resources: string[]) {
+    path(...resources: string[]): string {
         return [this.base, ...resources].join("/");
+    }
+
+    loginPath(queryParams: string = window.location.search): string {
+        return this.path(`login/github${queryParams}`);
     }
 
     async get(init: RequestInit = this.defaultInit): Promise<Playground> {
@@ -99,6 +104,10 @@ export class Client {
 
     // Sessions
 
+    async getSession(id: string, init: RequestInit = this.defaultInit): Promise<Session | null> {
+        return rpc(this.path(Client.sessionsResource, id), init, this.timeout);
+    }
+
     async listSessions(init: RequestInit = this.defaultInit): Promise<Record<string, Session>> {
         return rpc(this.path(Client.sessionsResource), init, this.timeout);
     }
@@ -124,6 +133,12 @@ export class Client {
             method: 'DELETE',
             ...init
         }, this.timeout);
+    }
+
+    // Templates
+
+    async listTemplates(init: RequestInit = this.defaultInit): Promise<Record<string, Template>> {
+        return rpc(this.path(Client.templatesResource), init, this.timeout);
     }
 
     // Pools

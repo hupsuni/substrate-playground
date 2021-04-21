@@ -105,7 +105,7 @@ build-template:
     && git checkout ${REF} \
     $(eval REV = $(shell git rev-parse --short HEAD))
 
-	$(eval TAG = paritytech/substrate-playground-template-${TEMPLATE}:sha-${REV})
+	$(eval TAG=paritytech/substrate-playground-template-${TEMPLATE}:sha-${REV})
 	$(eval TAG_THEIA=paritytech/substrate-playground-template-${TEMPLATE}-theia:sha-${REV})
 	@cd templates; docker build --force-rm --build-arg BASE_TEMPLATE_VERSION=${BASE_TEMPLATE_VERSION} -t ${TAG} -f Dockerfile.template ${REPOSITORY_CLONE} \
 	&& docker build --force-rm --build-arg BASE_TEMPLATE_VERSION=${BASE_TEMPLATE_VERSION} --build-arg TEMPLATE_IMAGE=${TAG} -t ${TAG_THEIA} -f Dockerfile.theia-template .
@@ -114,21 +114,6 @@ build-template:
 push-template: build-template
 	docker push paritytech/substrate-playground-template-${TEMPLATE}:sha-${REV}
 	docker push paritytech/substrate-playground-template-${TEMPLATE}-theia:sha-${REV}
-
-build-test-template: push-template-base push-template-theia-base
-	$(eval BASE_TEMPLATE_VERSION=$(shell grep BASE_TEMPLATE_VERSION conf/templates/.env | cut -d '=' -f2))
-	$(eval TAG=paritytech/substrate-playground-template-test:latest)
-	$(eval TAG_THEIA=paritytech/substrate-playground-template-test-theia:latest)
-	@cd templates; docker build --force-rm --build-arg BASE_TEMPLATE_VERSION=sha-${BASE_TEMPLATE_VERSION} -t ${TAG} -f Dockerfile.template test
-	@cd templates; docker build --force-rm --build-arg BASE_TEMPLATE_VERSION=sha-${BASE_TEMPLATE_VERSION} --build-arg TEMPLATE_IMAGE=${TAG} -t ${TAG_THEIA} -f Dockerfile.theia-template .
-
-push-test-template: build-test-templates
-	docker push paritytech/substrate-playground-template-test:latest
-	docker push paritytech/substrate-playground-template-test-theia:latest
-
-run-test-template: push-test-templates ## Run a fresh Test theia template
-	docker run -p 3000:3000 paritytech/substrate-playground-template-test-theia:latest
-	python -m webbrowser -t http://localhost:3000
 
 build-backend-docker-images: ## Build backend docker images
 	$(eval PLAYGROUND_DOCKER_IMAGE_VERSION=$(shell git rev-parse --short HEAD))
@@ -171,18 +156,21 @@ endif
 
 k8s-create-cluster: requires-env
 	# See https://cloud.google.com/compute/docs/machine-types
-	@read -p "Client ID?" CLIENT_ID; \
-	read -p "Client secret?" CLIENT_SECRET; \
 	gcloud container clusters create ${GKE_CLUSTER} \
         --release-channel regular \
         --zone us-central1-a \
         --node-locations us-central1-a \
         --machine-type n2d-standard-8 \
         --preemptible \
-        --num-nodes 1 && \
-	kubectl create ns ${NAMESPACE} && \
-	kubectl create configmap playground-config --namespace=playground --from-literal=github.clientId="$${CLIENT_ID}" --from-literal=session.defaultDuration="180" --from-literal=session.defaultMaxPerNode="2" --from-literal=session.defaultPoolAffinity="default-session" && \
-	kubectl create secret generic playground-secrets --namespace=playground --from-literal=github.clientSecret="$${CLIENT_SECRET}" --from-literal=rocket.secretKey=`openssl rand -base64 32` && \
+        --num-nodes 1
+
+k8s-setup-env: requires-k8s
+	# See https://cloud.google.com/compute/docs/machine-types
+	@read -p "GH client ID?" CLIENT_ID; \
+	read -p "GH client secret?" CLIENT_SECRET; \
+	kubectl create ns ${NAMESPACE} --dry-run=client -o yaml | kubectl apply -f - && \
+	kubectl create configmap playground-config --namespace=playground --from-literal=github.clientId="$${CLIENT_ID}" --from-literal=session.defaultDuration="45" --from-literal=session.maxDuration="1440" --from-literal=session.defaultMaxPerNode="2" --from-literal=session.defaultPoolAffinity="default-session" --dry-run=client -o yaml | kubectl apply -f - && \
+	kubectl create secret generic playground-secrets --namespace=playground --from-literal=github.clientSecret="$${CLIENT_SECRET}" --from-literal=rocket.secretKey=`openssl rand -base64 32` --dry-run=client -o yaml | kubectl apply -f - && \
 	kubectl create configmap playground-templates --namespace=${NAMESPACE} --from-file=conf/k8s/overlays/${ENV}/templates/ --dry-run=client -o yaml | kubectl apply -f - && \
 	kubectl create configmap playground-users --namespace=${NAMESPACE} --from-file=conf/k8s/overlays/${ENV}/users/ --dry-run=client -o yaml | kubectl apply -f -
 
@@ -203,9 +191,13 @@ k8s-gke-static-ip: requires-k8s
 	gcloud compute addresses describe ${NAMESPACE} --region=${GKE_REGION} --format="value(address)"
 
 k8s-dev: requires-k8s
-	@kubectl label nodes docker-desktop cloud.google.com/gke-nodepool=default --overwrite
+    # Adds required nodepool annotation, default on GKE
+	@kubectl label nodes docker-desktop cloud.google.com/gke-nodepool=default-session --overwrite
 	@kubectl create ns ${NAMESPACE} --dry-run=client -o yaml | kubectl apply -f -
-	@cd conf/k8s; skaffold dev
+	@cd conf/k8s; skaffold dev --cleanup=false
+
+k8s-dev-delete: requires-k8s
+	@cd conf/k8s; skaffold delete
 
 k8s-deploy-playground: requires-k8s ## Deploy playground on kubernetes
 	kustomize build conf/k8s/overlays/${ENV}/ | kubectl apply --record -f -
@@ -225,7 +217,7 @@ k8s-update-users-config: requires-k8s ## Creates or replaces the `users` config 
 ##@ DNS certificates
 
 generate-challenge: requires-env
-	sudo certbot certonly --manual --preferred-challenges dns --server https://acme-v02.api.letsencrypt.org/directory --manual-public-ip-logging-ok --agree-tos -m admin@parity.io -d *.${PLAYGROUND_ID}.substrate.dev -d ${PLAYGROUND_ID}.substrate.dev
+	sudo certbot certonly --manual --preferred-challenges dns --server https://acme-v02.api.letsencrypt.org/directory --agree-tos -m admin@parity.io -d *.${PLAYGROUND_ID}.substrate.dev -d ${PLAYGROUND_ID}.substrate.dev
 
 get-challenge: requires-env
 	dig +short TXT _acme-challenge.${PLAYGROUND_ID}.substrate.dev @8.8.8.8

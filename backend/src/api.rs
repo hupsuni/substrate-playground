@@ -1,12 +1,13 @@
 //! HTTP endpoints exposed in /api context
-use crate::types::{
-    LoggedUser, SessionConfiguration, SessionUpdateConfiguration, UserConfiguration,
-    UserUpdateConfiguration,
-};
-use crate::Context;
 use crate::{
+    error::Result,
     github::{current_user, orgs, GitHubUser},
     kubernetes::Environment,
+    types::{
+        LoggedUser, SessionConfiguration, SessionUpdateConfiguration, UserConfiguration,
+        UserUpdateConfiguration,
+    },
+    Context,
 };
 use request::FormItems;
 use rocket::response::{content, status, Redirect};
@@ -76,7 +77,6 @@ impl<'a, 'r> FromRequest<'a, 'r> for LoggedUser {
             if !filtered || user.is_some() {
                 Outcome::Success(LoggedUser {
                     id: id.clone(),
-                    avatar: gh_user.avatar_url,
                     admin: user.map_or(false, |user| user.admin),
                     pool_affinity: user.and_then(|user| user.pool_affinity.clone()),
                     can_customize_duration: user.map_or(false, |user| user.can_customize_duration),
@@ -94,52 +94,33 @@ impl<'a, 'r> FromRequest<'a, 'r> for LoggedUser {
     }
 }
 
-fn result_to_jsonrpc<T: Serialize>(res: Result<T, String>) -> JsonValue {
+fn result_to_jsonrpc<T: Serialize>(res: Result<T>) -> JsonValue {
     match res {
         Ok(val) => json!({ "result": val }),
-        Err(err) => json!({ "error": err }),
+        Err(err) => json!({ "error": err.to_string() }),
     }
 }
 
 #[get("/")]
 pub fn get(state: State<'_, Context>, user: LoggedUser) -> JsonValue {
-    let manager = state.manager.clone();
-    result_to_jsonrpc(manager.get(user))
+    result_to_jsonrpc(state.manager.clone().get(user))
 }
 
 #[get("/", rank = 2)]
 pub fn get_unlogged(state: State<'_, Context>) -> JsonValue {
-    let manager = state.manager.clone();
-    result_to_jsonrpc(manager.get_unlogged())
+    result_to_jsonrpc(state.manager.get_unlogged())
 }
 
 // User resources. Only accessible to Admins.
 
 #[get("/users/<id>")]
-pub fn get_user(
-    state: State<'_, Context>,
-    user: LoggedUser,
-    id: String,
-) -> Result<JsonValue, status::Unauthorized<()>> {
-    if user.has_admin_read_rights() {
-        let manager = state.manager.clone();
-        Ok(result_to_jsonrpc(manager.get_user(&id)))
-    } else {
-        Err(status::Unauthorized::<()>(None))
-    }
+pub fn get_user(state: State<'_, Context>, user: LoggedUser, id: String) -> JsonValue {
+    result_to_jsonrpc(state.manager.get_user(&user, &id))
 }
 
 #[get("/users")]
-pub fn list_users(
-    state: State<'_, Context>,
-    user: LoggedUser,
-) -> Result<JsonValue, status::Unauthorized<()>> {
-    if user.has_admin_read_rights() {
-        let manager = state.manager.clone();
-        Ok(result_to_jsonrpc(manager.list_users()))
-    } else {
-        Err(status::Unauthorized::<()>(None))
-    }
+pub fn list_users(state: State<'_, Context>, user: LoggedUser) -> JsonValue {
+    result_to_jsonrpc(state.manager.list_users(&user))
 }
 
 #[put("/users/<id>", data = "<conf>")]
@@ -148,13 +129,8 @@ pub fn create_user(
     user: LoggedUser,
     id: String,
     conf: Json<UserConfiguration>,
-) -> Result<JsonValue, status::Unauthorized<()>> {
-    if user.has_admin_edit_rights() {
-        let manager = state.manager.clone();
-        Ok(result_to_jsonrpc(manager.create_user(id, conf.0)))
-    } else {
-        Err(status::Unauthorized::<()>(None))
-    }
+) -> JsonValue {
+    result_to_jsonrpc(state.manager.clone().create_user(&user, id, conf.0))
 }
 
 #[patch("/users/<id>", data = "<conf>")]
@@ -163,35 +139,20 @@ pub fn update_user(
     user: LoggedUser,
     id: String,
     conf: Json<UserUpdateConfiguration>,
-) -> Result<JsonValue, status::Unauthorized<()>> {
-    if user.has_admin_edit_rights() {
-        let manager = state.manager.clone();
-        Ok(result_to_jsonrpc(manager.update_user(id, conf.0)))
-    } else {
-        Err(status::Unauthorized::<()>(None))
-    }
+) -> JsonValue {
+    result_to_jsonrpc(state.manager.clone().update_user(user, id, conf.0))
 }
 
 #[delete("/users/<id>")]
-pub fn delete_user(
-    state: State<'_, Context>,
-    user: LoggedUser,
-    id: String,
-) -> Result<JsonValue, status::Unauthorized<()>> {
-    if user.has_admin_edit_rights() {
-        let manager = state.manager.clone();
-        Ok(result_to_jsonrpc(manager.delete_user(id)))
-    } else {
-        Err(status::Unauthorized::<()>(None))
-    }
+pub fn delete_user(state: State<'_, Context>, user: LoggedUser, id: String) -> JsonValue {
+    result_to_jsonrpc(state.manager.clone().delete_user(&user, id))
 }
 
 // Current Session
 
 #[get("/session")]
 pub fn get_current_session(state: State<'_, Context>, user: LoggedUser) -> JsonValue {
-    let manager = state.manager.clone();
-    result_to_jsonrpc(manager.get_session(&user.id))
+    result_to_jsonrpc(state.manager.get_session(&user, &user.id))
 }
 
 #[get("/session", rank = 2)]
@@ -211,8 +172,7 @@ pub fn create_current_session(
     user: LoggedUser,
     conf: Json<SessionConfiguration>,
 ) -> JsonValue {
-    let manager = state.manager.clone();
-    result_to_jsonrpc(manager.create_session(&user.id, &user, conf.0))
+    result_to_jsonrpc(state.manager.create_session(&user, &user.id, conf.0))
 }
 
 #[put("/session", data = "<_conf>", rank = 2)]
@@ -228,8 +188,7 @@ pub fn update_current_session(
     user: LoggedUser,
     conf: Json<SessionUpdateConfiguration>,
 ) -> JsonValue {
-    let manager = state.manager.clone();
-    result_to_jsonrpc(manager.update_session(&user.id, &user, conf.0))
+    result_to_jsonrpc(state.manager.update_session(&user.id, &user, conf.0))
 }
 
 #[patch("/session", data = "<_conf>", rank = 2)]
@@ -241,8 +200,7 @@ pub fn update_current_session_unlogged(
 
 #[delete("/session")]
 pub fn delete_current_session(state: State<'_, Context>, user: LoggedUser) -> JsonValue {
-    let manager = state.manager.clone();
-    result_to_jsonrpc(manager.delete_session(&user.id))
+    result_to_jsonrpc(state.manager.delete_session(&user, &user.id))
 }
 
 #[delete("/session", rank = 2)]
@@ -253,30 +211,13 @@ pub fn delete_current_session_unlogged() -> status::Unauthorized<()> {
 // Sessions
 
 #[get("/sessions/<id>")]
-pub fn get_session(
-    state: State<'_, Context>,
-    user: LoggedUser,
-    id: String,
-) -> Result<JsonValue, status::Unauthorized<()>> {
-    if user.has_admin_read_rights() {
-        let manager = state.manager.clone();
-        Ok(result_to_jsonrpc(manager.get_session(&id)))
-    } else {
-        Err(status::Unauthorized::<()>(None))
-    }
+pub fn get_session(state: State<'_, Context>, user: LoggedUser, id: String) -> JsonValue {
+    result_to_jsonrpc(state.manager.get_session(&user, &id))
 }
 
 #[get("/sessions")]
-pub fn list_sessions(
-    state: State<'_, Context>,
-    user: LoggedUser,
-) -> Result<JsonValue, status::Unauthorized<()>> {
-    if user.has_admin_read_rights() {
-        let manager = state.manager.clone();
-        Ok(result_to_jsonrpc(manager.list_sessions()))
-    } else {
-        Err(status::Unauthorized::<()>(None))
-    }
+pub fn list_sessions(state: State<'_, Context>, user: LoggedUser) -> JsonValue {
+    result_to_jsonrpc(state.manager.list_sessions(&user))
 }
 
 #[put("/sessions/<id>", data = "<conf>")]
@@ -285,15 +226,8 @@ pub fn create_session(
     user: LoggedUser,
     id: String,
     conf: Json<SessionConfiguration>,
-) -> Result<JsonValue, status::Unauthorized<()>> {
-    if user.has_admin_edit_rights() {
-        let manager = state.manager.clone();
-        Ok(result_to_jsonrpc(
-            manager.create_session(&id, &user, conf.0),
-        ))
-    } else {
-        Err(status::Unauthorized::<()>(None))
-    }
+) -> JsonValue {
+    result_to_jsonrpc(state.manager.create_session(&user, &id, conf.0))
 }
 
 #[patch("/sessions/<id>", data = "<conf>")]
@@ -302,58 +236,32 @@ pub fn update_session(
     user: LoggedUser,
     id: String,
     conf: Json<SessionUpdateConfiguration>,
-) -> Result<JsonValue, status::Unauthorized<()>> {
-    if user.has_admin_edit_rights() { // TODO owners can edit
-        let manager = state.manager.clone();
-        Ok(result_to_jsonrpc(
-            manager.update_session(&id, &user, conf.0),
-        ))
-    } else {
-        Err(status::Unauthorized::<()>(None))
-    }
+) -> JsonValue {
+    result_to_jsonrpc(state.manager.update_session(&id, &user, conf.0))
 }
 
 #[delete("/sessions/<id>")]
-pub fn delete_session(
-    state: State<'_, Context>,
-    user: LoggedUser,
-    id: String,
-) -> Result<JsonValue, status::Unauthorized<()>> {
-    if user.has_admin_edit_rights() {
-        let manager = state.manager.clone();
-        Ok(result_to_jsonrpc(manager.delete_session(&id)))
-    } else {
-        Err(status::Unauthorized::<()>(None))
-    }
+pub fn delete_session(state: State<'_, Context>, user: LoggedUser, id: String) -> JsonValue {
+    result_to_jsonrpc(state.manager.delete_session(&user, &id))
+}
+
+// Templates
+
+#[get("/templates")]
+pub fn list_templates(state: State<'_, Context>) -> JsonValue {
+    result_to_jsonrpc(state.manager.list_templates())
 }
 
 // Pools
 
 #[get("/pools/<id>")]
-pub fn get_pool(
-    state: State<'_, Context>,
-    user: LoggedUser,
-    id: String,
-) -> Result<JsonValue, status::Unauthorized<()>> {
-    if user.has_admin_read_rights() {
-        let manager = state.manager.clone();
-        Ok(result_to_jsonrpc(manager.get_pool(&id)))
-    } else {
-        Err(status::Unauthorized::<()>(None))
-    }
+pub fn get_pool(state: State<'_, Context>, user: LoggedUser, id: String) -> JsonValue {
+    result_to_jsonrpc(state.manager.get_pool(&user, &id))
 }
 
 #[get("/pools")]
-pub fn list_pools(
-    state: State<'_, Context>,
-    user: LoggedUser,
-) -> Result<JsonValue, status::Unauthorized<()>> {
-    if user.has_admin_read_rights() {
-        let manager = state.manager.clone();
-        Ok(result_to_jsonrpc(manager.list_pools()))
-    } else {
-        Err(status::Unauthorized::<()>(None))
-    }
+pub fn list_pools(state: State<'_, Context>, user: LoggedUser) -> JsonValue {
+    result_to_jsonrpc(state.manager.list_pools(&user))
 }
 
 // GitHub login logic
@@ -408,31 +316,28 @@ pub fn post_install_callback(
     origin: &Origin,
     token: TokenResponse<GitHubUser>,
     mut cookies: Cookies<'_>,
-) -> Result<Redirect, String> {
+) -> Redirect {
     cookies.add_private(
         Cookie::build(COOKIE_TOKEN, token.access_token().to_string())
             .same_site(SameSite::Lax)
             .finish(),
     );
 
-    Ok(Redirect::to(format!("/{}", query_segment(origin))))
+    Redirect::to(format!("/{}", query_segment(origin)))
 }
 
 #[get("/login?<bearer>")]
-pub fn login(mut cookies: Cookies<'_>, bearer: String) -> Result<(), String> {
+pub fn login(mut cookies: Cookies<'_>, bearer: String) {
     cookies.add_private(
         Cookie::build(COOKIE_TOKEN, bearer)
             .same_site(SameSite::Lax)
             .finish(),
-    );
-
-    Ok(())
+    )
 }
 
 #[get("/logout")]
-pub fn logout(cookies: Cookies<'_>) -> JsonValue {
-    clear(cookies);
-    result_to_jsonrpc(Ok(()))
+pub fn logout(cookies: Cookies<'_>) {
+    clear(cookies)
 }
 
 fn clear(mut cookies: Cookies<'_>) {
