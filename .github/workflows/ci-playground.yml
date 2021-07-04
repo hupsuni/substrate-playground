@@ -27,9 +27,11 @@ jobs:
 
       - name: Lint
         run: yarn lint
+        continue-on-error: true
 
       - name: Audit
         run: yarn audit
+        continue-on-error: true
 
       - name: Build
         run: yarn build
@@ -40,31 +42,25 @@ jobs:
   backend:
     runs-on: ubuntu-latest
     if: "! contains(github.event.head_commit.message, '[CI Skip]')"
-    defaults:
-      run:
-        working-directory: ./backend
     steps:
 
       - uses: actions/checkout@v2
 
-      - uses: actions-rs/toolchain@v1
+      # Workaround https://github.com/actions-rs/toolchain/issues/110
+      - name: Make toolchain version available in current directory
+        run: cp backend/rust-toolchain .
+
+      - uses: actions-rs/toolchain@v1.0.7
         with:
-          toolchain: nightly
           profile: minimal
           override: true
           components: rustfmt, clippy
 
-      - name: Check Formatting
-        run: cargo check-fmt
-
-      - name: Lint
-        run: cargo lint
-
-      - name: Build
-        run: cargo build --verbose
-
-      - name: Run tests
-        run: cargo test --verbose
+      - uses: actions-rs/cargo@v1
+        with:
+          command: test
+          # Workaround https://github.com/actions-rs/cargo/issues/86
+          args: --manifest-path backend/Cargo.toml
 
   docker:
     runs-on: ubuntu-latest

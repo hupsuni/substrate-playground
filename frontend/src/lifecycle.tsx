@@ -1,23 +1,12 @@
-import { assign, Machine } from 'xstate';
-import { Client, Configuration, LoggedUser, Template } from '@substrate/playground-client';
+import { assign, createMachine, StateMachine, StateSchema } from 'xstate';
+import { Client, Configuration, LoggedUser } from '@substrate/playground-client';
 import { approve, approved } from './terms';
 
-export enum PanelId {Session, Admin, Stats, Theia}
+export enum PanelId {Workspace, Admin, Stats, Theia}
 
 export interface Context {
   panel: PanelId,
-  conf: Configuration,
-  user?: LoggedUser,
-  templates: Record<string, Template>,
   error?: string,
-}
-
-export enum States {
-    TERMS_UNAPPROVED = '@state/TERMS_UNAPPROVED',
-    SETUP = '@state/SETUP',
-    LOGGED = '@state/LOGGED',
-    UNLOGGED = '@state/UNLOGGED',
-    UNLOGGING = '@state/UNLOGGING',
 }
 
 export enum Events {
@@ -33,13 +22,60 @@ export enum Actions {
     STORE_TERMS_HASH = '@action/STORE_TERMS_HASH',
 }
 
-export function newMachine(client: Client, id: PanelId) {
-  return Machine<Context>({
+export type Event =
+  | { type: Events.TERMS_APPROVAL; id: string }
+  | { type: Events.LOGIN; user: LoggedUser; conf: Configuration }
+  | { type: Events.SELECT; panel: PanelId }
+  | { type: Events.RESTART; }
+  | { type: Events.UNLOGIN; conf?: Configuration; error?: string }
+  | { type: Events.LOGOUT; };
+
+
+export enum States {
+    TERMS_UNAPPROVED = '@state/TERMS_UNAPPROVED',
+    SETUP = '@state/SETUP',
+    LOGGED = '@state/LOGGED',
+    UNLOGGED = '@state/UNLOGGED',
+    UNLOGGING = '@state/UNLOGGING',
+}
+
+export type Typestate =
+  | {
+      value: States.SETUP;
+      context: Context;
+    }
+  | {
+      value: States.TERMS_UNAPPROVED;
+      context: Context;
+    }
+  | {
+      value: States.LOGGED;
+      context: Context & {  user: LoggedUser, conf: Configuration };
+    }
+  | {
+      value: States.UNLOGGED;
+      context: Context;
+    }
+  | {
+      value: States.UNLOGGING;
+      context: Context;
+     };
+
+export interface SchemaType extends StateSchema {
+    states: {
+        [States.TERMS_UNAPPROVED]: Record<string, unknown>;
+        [States.SETUP]: Record<string, unknown>;
+        [States.LOGGED]: Record<string, unknown>;
+        [States.UNLOGGED]: Record<string, unknown>;
+        [States.UNLOGGING]: Record<string, unknown>;
+    };
+}
+
+export function newMachine(client: Client, id: PanelId): StateMachine<Context, SchemaType, Event, Typestate> {
+  return createMachine<Context, Event, Typestate>({
     initial: approved()? States.SETUP: States.TERMS_UNAPPROVED,
     context: {
         panel: id,
-        templates: {},
-
     },
     states: {
         [States.TERMS_UNAPPROVED]: {
@@ -53,11 +89,11 @@ export function newMachine(client: Client, id: PanelId) {
             invoke: {
                 src: () => async (callback) => {
                     try {
-                        const { configuration, templates, user } = (await client.get());
+                        const { configuration, user } = (await client.get());
                         if (user) {
-                            callback({type: Events.LOGIN, user: user, templates: templates, conf: configuration});
+                            callback({type: Events.LOGIN, user: user, conf: configuration});
                         } else {
-                            callback({type: Events.UNLOGIN, templates: templates, conf: configuration});
+                            callback({type: Events.UNLOGIN, conf: configuration});
                         }
                     } catch (e) {
                         const error = e.message || JSON.stringify(e);
@@ -69,15 +105,13 @@ export function newMachine(client: Client, id: PanelId) {
                                   actions: assign((_, event) => {
                                     return {
                                       user: event.user,
-                                      templates: event.templates,
                                       conf: event.conf,
+                                      error: undefined,
                                     }
                                   })},
                  [Events.UNLOGIN]: {target: States.UNLOGGED,
                                     actions: assign((_, event) => {
                                       return {
-                                        user: undefined,
-                                        templates: event.templates,
                                         conf: event.conf,
                                         error: event.error,
                                       }

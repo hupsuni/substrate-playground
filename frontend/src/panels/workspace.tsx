@@ -1,5 +1,4 @@
 import React, { useState } from "react";
-import marked from 'marked';
 import ArrowDropDownIcon from '@material-ui/icons/ArrowDropDown';
 import Button from '@material-ui/core/Button';
 import ButtonGroup from "@material-ui/core/ButtonGroup";
@@ -24,8 +23,8 @@ import TableHead from '@material-ui/core/TableHead';
 import TableRow from '@material-ui/core/TableRow';
 import Typography from '@material-ui/core/Typography';
 import { makeStyles, createStyles, Theme } from '@material-ui/core/styles';
-import { Client, Configuration, NameValuePair, LoggedUser, Port, Session, SessionConfiguration, Template } from '@substrate/playground-client';
-import { SessionCreationDialog, canCustomize } from "./admin";
+import { Client, Configuration, NameValuePair, LoggedUser, Port, Workspace, WorkspaceConfiguration, Repository, WorkspaceState, RepositoryRuntimeConfiguration, RepositoryConfiguration } from '@substrate/playground-client';
+import { WorkspaceCreationDialog, canCustomize } from "./admin/workspaces";
 import { CenteredContainer, ErrorMessage, ErrorSnackbar, LoadingPanel } from "../components";
 import { useInterval } from "../hooks";
 import { formatDuration } from "../utils";
@@ -42,7 +41,7 @@ const useStyles = makeStyles((theme: Theme) =>
 
 const options = [{id: 'create', label: 'Create'}, {id: 'custom', label: 'Customize and Create'}];
 
-export default function SplitButton({ template, disabled, onCreate, onCreateCustom }: { template: string, disabled: boolean, onCreate: (conf: SessionConfiguration) => void, onCreateCustom: () => void}): JSX.Element {
+export default function SplitButton({ repository, disabled, onCreate, onCreateCustom }: { repository: Repository, disabled: boolean, onCreate: (conf: WorkspaceConfiguration) => void, onCreateCustom: () => void}): JSX.Element {
   const [open, setOpen] = React.useState(false);
   const anchorRef = React.useRef<HTMLDivElement>(null);
   const [selectedIndex, setSelectedIndex] = React.useState(0);
@@ -50,14 +49,15 @@ export default function SplitButton({ template, disabled, onCreate, onCreateCust
   const handleClick = () => {
       const selection = options[selectedIndex];
       if (selection.id == 'create') {
-        onCreate({template: template});
+        const conf = {repositoryDetails: {id: repository.id, reference: ""}};
+        onCreate(conf);
       } else {
         onCreateCustom();
       }
   };
 
   const handleMenuItemClick = (
-    event: React.MouseEvent<HTMLLIElement, MouseEvent>,
+    _event: React.MouseEvent<HTMLLIElement, MouseEvent>,
     index: number,
   ) => {
     setSelectedIndex(index);
@@ -122,22 +122,42 @@ export default function SplitButton({ template, disabled, onCreate, onCreateCust
   );
 }
 
-function TemplateSelector({client, conf, user, templates, onDeployed, onRetry}: {client: Client, conf: Configuration, user: LoggedUser, templates: Record<string, Template>, onDeployed: (conf: SessionConfiguration) => Promise<void>, onRetry: () => void}): JSX.Element {
-    const publicTemplates = Object.entries(templates).filter(([, v]) => v.tags?.public == "true");
+function workspaceConfiguration(repository: Repository, reference: string): WorkspaceConfiguration {
+    return {repositoryDetails: {id: repository.id, reference: reference}};
+}
+
+function RepositorySelector({client, conf, user, onDeployed, onRetry}: {client: Client, conf: Configuration, user?: LoggedUser, onDeployed: (conf: WorkspaceConfiguration) => Promise<void>, onRetry: () => void}): JSX.Element {
+    const [repositories, setRepositories] = useState<Repository[] | undefined>();
+    const publicTemplates = Object.entries(repositories || {}).filter(([, v]) => v.tags?.public == "true");
     const templatesAvailable = publicTemplates.length > 0;
-    const [selection, select] = useState(templatesAvailable ? publicTemplates[0] : null);
+    const [selection, select] = useState<[string, Repository]>();
     const [deploying, setDeploying] = useState(false);
     const [errorMessage, setErrorMessage] = useState<string | null>(null);
-    const [openCustom, setOpenCustom] = React.useState(false);
-    const classes = useStyles();
+    const [openCustom, setOpenCustom] = useState(false);
 
-    async function onCreateClick(conf: SessionConfiguration): Promise<void> {
+    useInterval(async () => {
+        try {
+            setRepositories(await client.listRepositories());
+        } catch (e) {
+            setErrorMessage(e.message);
+            setRepositories([]);
+        }
+    }, 5000);
+
+    React.useEffect(() => {
+        if (!selection) {
+            select(publicTemplates?.[0] || null);
+        }
+    }, [publicTemplates]);
+
+    async function onCreateClick(conf: WorkspaceConfiguration): Promise<void> {
         try {
             setDeploying(true);
             await onDeployed(conf);
-            setDeploying(false);
         } catch (e) {
-            setErrorMessage(`Failed to create a new session: ${e}`);
+            setErrorMessage(`Failed to create a new workspace: ${e.message}`);
+        } finally {
+            setDeploying(false);
         }
     }
 
@@ -149,50 +169,42 @@ function TemplateSelector({client, conf, user, templates, onDeployed, onRetry}: 
         }
     }
 
-    if (selection) {
+    if (errorMessage) {
+        return <ErrorSnackbar open={true} message={errorMessage} onClose={() => setErrorMessage(null)} />;
+    } else if (repositories == undefined) {
+        return <LoadingPanel />;
+    } else if (selection) {
         return (
-            <>
-                <Typography variant="h5" style={{padding: 20}}>Select a template</Typography>
+            <div style={{width: 200}}>
+                <Typography variant="h5" style={{padding: 20}}>Select a repository</Typography>
                 <Divider orientation="horizontal" />
                 <Container style={{display: "flex", flex: 1, padding: 0, alignItems: "center", overflowY: "auto"}}>
-                    <div style={{display: "flex", flex: 1, flexDirection: "row", minHeight: 0, height: "100%"}}>
+                    <div style={{flex: 1}}>
                             <List style={{paddingTop: 0, paddingBottom: 0, overflowY: "auto"}}>
-                                {publicTemplates.map(([id, template], index: number) => (
-                                <ListItem button key={index} selected={selection[1].name === template.name} onClick={() => select([id, template])}>
-                                    <ListItemText primary={template.name} />
+                                {publicTemplates.map(([id, repository], index: number) => (
+                                <ListItem button key={index} selected={selection[1].id === repository.id} onClick={() => select([id, repository])}>
+                                    <ListItemText primary={repository.id} />
                                 </ListItem>
                                 ))}
                             </List>
-                            <Divider flexItem={true} orientation={"vertical"} light={true} />
-                            <div style={{flex: 1, marginLeft: 20, paddingRight: 20, overflow: "auto", textAlign: "left"}}>
-                                <Typography>
-                                    <span dangerouslySetInnerHTML={{__html:marked(selection[1].description)}}></span>
-                                </Typography>
-                                <Divider orientation={"horizontal"} light={true} />
-                                <Typography className={classes.root} variant="overline">
-                                    #{selection[1].image}
-                                </Typography>
-                            </div>
                         </div>
                 </Container>
                 <Divider orientation="horizontal" />
                 <Container style={{ display: "flex", flexDirection: "column", alignItems: "flex-end", paddingTop: 10, paddingBottom: 10 }}>
-                    {canCustomize(user)
-                    ? <SplitButton template={selection[0]} onCreate={() => onCreateClick({template: selection[0]})} onCreateCustom={() => setOpenCustom(true)} disabled={!createEnabled()} />
-                    : <Button onClick={() => onCreateClick({template: selection[0]})} color="primary" variant="contained" disableElevation disabled={!createEnabled()}>
+                    {user && canCustomize(user)
+                    ? <SplitButton repository={selection[1]} onCreate={() => onCreateClick(workspaceConfiguration(selection[1], ""))} onCreateCustom={() => setOpenCustom(true)} disabled={!createEnabled()} />
+                    : <Button onClick={() => onCreateClick(workspaceConfiguration(selection[1], ""))} color="primary" variant="contained" disableElevation disabled={!createEnabled()}>
                           Create
                       </Button>}
                 </Container>
-                {errorMessage &&
-                <ErrorSnackbar open={true} message={errorMessage} onClose={() => setErrorMessage(null)} />}
                 {openCustom &&
-                <SessionCreationDialog client={client} user={user} template={selection[0]} conf={conf} templates={templates} show={openCustom} onCreate={onCreateClick} onHide={() => setOpenCustom(false)} />}
-            </>
+                <WorkspaceCreationDialog client={client} user={user} template={selection[0]} conf={conf} templates={repositories} show={openCustom} onCreate={onCreateClick} onHide={() => setOpenCustom(false)} />}
+            </div>
         );
     } else {
         return (
             <CenteredContainer>
-                <ErrorMessage reason="Can't find any public template. The templates configuration might be incorrect." action={onRetry} />
+                <ErrorMessage reason="Can't find any public repository." action={onRetry} />
             </CenteredContainer>
         );
     }
@@ -254,55 +266,73 @@ function PortsTable({ ports }: {ports?: Port[]}): JSX.Element {
     );
 }
 
-export function SessionDetails({ session }: {session: Session}): JSX.Element {
-    const { pod, template, duration } = session;
-    const { name, runtime } = template;
-    const { container, phase, startTime, conditions } = pod;
-    const reason = container?.reason || (conditions && conditions.length > 0 && conditions[0].reason);
+function WorkspaceRuntime({ runtime }: { runtime: RepositoryRuntimeConfiguration }): JSX.Element {
+    return (
+        <div>
+            <div style={{display: "flex", paddingTop: 20}}>
+                <div style={{flex: 1, paddingRight: 10}}>
+                    <Typography variant="h6" id="tableTitle" component="div">
+                    Environment
+                    </Typography>
+                    <EnvTable env={runtime.env} />
+                </div>
+                <div style={{ flex: 1 }}>
+                    <Typography variant="h6" id="tableTitle" component="div">
+                        Ports
+                    </Typography>
+                    <PortsTable ports={runtime.ports} />
+                </div>
+            </div>
+        </div>
+    );
+}
+
+function WorkspaceStateDetails({ workspace }: { workspace: Workspace}): JSX.Element {
+    const { maxDuration, state } = workspace;
+    switch (state.tag) {
+        case "Running":
+            return (
+            <>
+                <Typography color="textSecondary" gutterBottom>
+                Started {formatDuration(state.startTime)} ago ({formatDuration(maxDuration*60-state.startTime)} left)
+                </Typography>
+                <WorkspaceRuntime runtime={state.runtime} />
+            </>);
+        case "Failed":
+            return (
+                <Typography color="textSecondary" gutterBottom>
+                Phase: <em>{state.tag}</em> (${state.reason})
+                </Typography>
+            );
+        default:
+            return <></>;
+    }
+}
+
+export function WorkspaceDetails({ workspace }: {workspace: Workspace}): JSX.Element {
+    const { repositoryDetails } = workspace;
+    const { id } = repositoryDetails;
     return (
         <Card style={{ margin: 20 }} variant="outlined">
             <CardContent>
                 <Typography>
-                    {name}
+                    {id}
                 </Typography>
-                {startTime &&
-                <Typography color="textSecondary" gutterBottom>
-                Started {formatDuration(startTime)} ago ({formatDuration(duration*60-startTime)} left)
-                </Typography>
-                }
-                <Typography color="textSecondary" gutterBottom>
-                Phase: <em>{phase}</em> {reason && `(${reason})`}
-                </Typography>
-                {runtime &&
-                    <div style={{display: "flex", paddingTop: 20}}>
-                        <div style={{flex: 1, paddingRight: 10}}>
-                            <Typography variant="h6" id="tableTitle" component="div">
-                            Environment
-                            </Typography>
-                            <EnvTable env={runtime.env} />
-                        </div>
-                        <div style={{ flex: 1 }}>
-                            <Typography variant="h6" id="tableTitle" component="div">
-                                Ports
-                            </Typography>
-                            <PortsTable ports={runtime.ports} />
-                        </div>
-                    </div>
-                }
+                <WorkspaceStateDetails workspace={workspace} />
             </CardContent>
         </Card>
     );
 }
 
-function ExistingSession({session, onStop, onConnect}: {session: Session, onStop: () => void, onConnect: (session: Session) => void}): JSX.Element {
+function ExistingWorkspace({workspace, onStop, onConnect}: {workspace: Workspace, onStop: () => void, onConnect: (workspace: Workspace) => void}): JSX.Element {
     const [stopping, setStopping] = useState(false);
     const [errorMessage, setErrorMessage] = useState<string | null>(null);
 
-    function onConnectClick(session: Session): void {
+    function onConnectClick(workspace: Workspace): void {
         try {
-            onConnect(session);
+            onConnect(workspace);
         } catch {
-            setErrorMessage("Failed to connect to the session");
+            setErrorMessage("Failed to connect to the workspace");
         }
     }
 
@@ -312,16 +342,16 @@ function ExistingSession({session, onStop, onConnect}: {session: Session, onStop
             onStop();
         } catch {
             setStopping(false);
-            setErrorMessage("Failed to stop the session");
+            setErrorMessage("Failed to stop the workspace");
         }
     }
 
     return (
         <>
-            <Typography variant="h5" style={{padding: 20}}>Existing session</Typography>
+            <Typography variant="h5" style={{padding: 20}}>Existing workspace</Typography>
             <Divider orientation="horizontal" />
             <Container style={{display: "flex", flex: 1, padding: 0, justifyContent: "center", alignItems: "center", overflowY: "auto"}}>
-                <SessionDetails session={session} />
+                <WorkspaceDetails workspace={workspace} />
             </Container>
             <Divider orientation="horizontal" />
             <Container style={{display: "flex", flexDirection: "column", alignItems: "flex-end", paddingTop: 10, paddingBottom: 10}}>
@@ -329,7 +359,7 @@ function ExistingSession({session, onStop, onConnect}: {session: Session, onStop
                     <Button onClick={onStopClick} disabled={stopping} color="secondary" disableElevation>
                         Stop
                     </Button>
-                    <Button onClick={() => onConnectClick(session)} disabled={stopping || session.pod.phase !== 'Running'} disableElevation>
+                    <Button onClick={() => onConnectClick(workspace)} disabled={stopping || workspace.state.tag !== 'Running'} disableElevation>
                         Connect
                     </Button>
                 </ButtonGroup>
@@ -340,18 +370,19 @@ function ExistingSession({session, onStop, onConnect}: {session: Session, onStop
     );
 }
 
-export function SessionPanel({ client, conf, user, templates, onDeployed, onConnect, onRetry, onStop }: {client: Client, conf: Configuration, user: LoggedUser, templates: Record<string, Template>, onStop: () => void, onConnect: (session: Session) => void, onDeployed: (conf: SessionConfiguration) => Promise<void>, onRetry: () => void}): JSX.Element {
-    const [session, setSession] = useState<Session | null | undefined>(undefined);
+export function WorkspacePanel({ client, conf, user, onDeployed, onConnect, onRetry, onStop }: {client: Client, conf: Configuration, user?: LoggedUser, onStop: () => void, onConnect: (workspace: Workspace) => void, onDeployed: (conf: WorkspaceConfiguration) => Promise<void>, onRetry: () => void}): JSX.Element {
+    const [workspace, setWorkspace] = useState<Workspace | null | undefined>(undefined);
 
-    useInterval(async () => setSession(await client.getCurrentSession()), 5000);
+    useInterval(async () => setWorkspace(await client.getCurrentWorkspace()), 5000);
+
     return (
         <Container style={{ display: "flex", flex: 1, justifyContent: "center", alignItems: "center" }}>
             <Paper style={{ display: "flex", flexDirection: "column", height: "60vh", width: "60vw", justifyContent: "center"}} elevation={3}>
-                {session === undefined
+                {workspace === undefined
                  ? <LoadingPanel />
-                 : session
-                 ?<ExistingSession session={session} onConnect={onConnect} onStop={onStop} />
-                 : <TemplateSelector client={client} conf={conf} user={user} templates={templates} onRetry={onRetry} onDeployed={onDeployed} />}
+                 : workspace
+                 ?<ExistingWorkspace workspace={workspace} onConnect={onConnect} onStop={onStop} />
+                 : <RepositorySelector client={client} conf={conf} user={user} onRetry={onRetry} onDeployed={onDeployed} />}
             </Paper>
         </Container>
     );

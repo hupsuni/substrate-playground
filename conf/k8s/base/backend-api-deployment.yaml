@@ -21,6 +21,7 @@ spec:
       containers:
       - name: backend-api
         image: paritytech/substrate-playground-backend-api
+        command: ["backend"]
         ports:
         - containerPort: 80
         env:
@@ -33,26 +34,6 @@ spec:
             value: "debug"
           - name: ROCKET_ADDRESS
             value: "0.0.0.0"
-          - name: SESSION_DEFAULT_DURATION
-            valueFrom:
-              configMapKeyRef:
-                name: playground-config
-                key: session.defaultDuration
-          - name: SESSION_MAX_DURATION
-            valueFrom:
-              configMapKeyRef:
-                name: playground-config
-                key: session.maxDuration
-          - name: SESSION_DEFAULT_POOL_AFFINITY
-            valueFrom:
-              configMapKeyRef:
-                name: playground-config
-                key: session.defaultPoolAffinity
-          - name: SESSION_DEFAULT_MAX_PER_NODE
-            valueFrom:
-              configMapKeyRef:
-                name: playground-config
-                key: session.defaultMaxPerNode
           - name: GITHUB_CLIENT_ID
             valueFrom:
               configMapKeyRef:
@@ -63,8 +44,45 @@ spec:
               secretKeyRef:
                 name: playground-secrets
                 key: github.clientSecret
+          - name: WORKSPACE_BASE_IMAGE
+            valueFrom:
+              configMapKeyRef:
+                name: playground-config
+                key: workspace.baseImage
+          - name: WORKSPACE_DEFAULT_DURATION
+            valueFrom:
+              configMapKeyRef:
+                name: playground-config
+                key: workspace.defaultDuration
+          - name: WORKSPACE_MAX_DURATION
+            valueFrom:
+              configMapKeyRef:
+                name: playground-config
+                key: workspace.maxDuration
+          - name: WORKSPACE_DEFAULT_POOL_AFFINITY
+            valueFrom:
+              configMapKeyRef:
+                name: playground-config
+                key: workspace.defaultPoolAffinity
+          - name: WORKSPACE_DEFAULT_MAX_PER_NODE
+            valueFrom:
+              configMapKeyRef:
+                name: playground-config
+                key: workspace.defaultMaxPerNode
           - name: ROCKET_SECRET_KEY
             valueFrom:
               secretKeyRef:
                 name: playground-secrets
                 key: rocket.secretKey
+        readinessProbe:
+          httpGet:
+            path: /api
+            port: 80
+          initialDelaySeconds: 5
+          periodSeconds: 5
+        livenessProbe:
+          httpGet:
+            path: /api
+            port: 80
+          initialDelaySeconds: 5
+          periodSeconds: 5

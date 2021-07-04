@@ -3,11 +3,9 @@
 # A multi-stage docker image (https://docs.docker.com/develop/develop-images/multistage-build/)
 # Based on https://github.com/bjornmolin/rust-minimal-docker
 
-FROM clux/muslrust:1.50.0-nightly-2020-11-27 AS builder
+FROM clux/muslrust:1.54.0-nightly-2021-05-20 AS builder
 
 WORKDIR /opt
-
-ENV BINARY_NAME=playground
 
 # Build the project with target x86_64-unknown-linux-musl
 
@@ -17,10 +15,9 @@ ENV BINARY_NAME=playground
 
 COPY Cargo.* ./
 
-RUN mkdir src \
-    && echo "fn main() {print!(\"Dummy main\");} // dummy file" > src/main.rs \
-    && set -x && cargo build --locked --target x86_64-unknown-linux-musl --release \
-    && set -x && rm target/x86_64-unknown-linux-musl/release/deps/$BINARY_NAME*
+RUN mkdir -p src/bin \
+    && echo "fn main() {print!(\"Dummy main\");} // dummy file" > src/bin/backend.rs \
+    && set -x && cargo build --locked --target x86_64-unknown-linux-musl --release
 
 # Now add the rest of the project and build the real main
 
@@ -40,12 +37,11 @@ ARG GITHUB_SHA
 
 COPY --from=builder /etc/ssl/certs/ca-certificates.crt /etc/ssl/certs/ca-certificates.crt
 
-ENV SSL_CERT_FILE=/etc/ssl/certs/ca-certificates.crt\
+ENV PATH=/\
+    SSL_CERT_FILE=/etc/ssl/certs/ca-certificates.crt\
     SSL_CERT_DIR=/etc/ssl/certs\
     GITHUB_SHA=$GITHUB_SHA\
     RUST_BACKTRACE=full\
     RUST_LOG="warn,playground=info"
 
-COPY --from=builder /opt/bin/$BINARY_NAME /
-
-CMD ["/playground"]
+COPY --from=builder /opt/bin/* /

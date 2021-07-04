@@ -1,102 +1,121 @@
 import React, { useState } from "react";
 import ReactDOM from "react-dom";
-import { Client, Configuration, LoggedUser, Session, Template, User } from '@substrate/playground-client';
+import { State } from "xstate";
+import { Client, Configuration, LoggedUser, Workspace } from '@substrate/playground-client';
 import { createMuiTheme, ThemeProvider } from '@material-ui/core/styles';
 import Button from "@material-ui/core/Button";
 import Typography from "@material-ui/core/Typography";
 import { useMachine } from '@xstate/react';
-import { CenteredContainer, ErrorMessage, LoadingPanel, Wrapper } from './components';
+import { CenteredContainer, ErrorMessage, LoadingPanel, Nav, NavMenuLogged, NavMenuUnlogged, NavSecondMenuAdmin, Wrapper } from './components';
 import { useInterval } from "./hooks";
-import { newMachine, Events, PanelId, States } from './lifecycle';
-import { AdminPanel } from './panels/admin';
+import { newMachine, Context, Event, Events, PanelId, States, Typestate, SchemaType } from './lifecycle';
+import { AdminPanel } from './panels/admin/index';
 import { LoginPanel } from './panels/login';
-import { SessionPanel } from './panels/session';
 import { StatsPanel } from './panels/stats';
 import { TermsPanel } from './panels/terms';
 import { TheiaPanel } from './panels/theia';
+import { WorkspacePanel } from './panels/workspace';
 import { terms } from "./terms";
+import { hasAdminReadRights } from "./utils";
 
-function MainPanel({ client, conf, user, id, templates, restartAction, onConnect, onDeployed }: { client: Client, conf: Configuration, user: LoggedUser, id: PanelId, templates: Record<string, Template>, restartAction: () => void, onConnect: () => void, onDeployed: () => void }): JSX.Element {
+function MainPanel({ client, params, conf, user, id, onRetry, onConnect, onAfterDeployed }: { client: Client, params: Params, conf: Configuration, user?: LoggedUser, id: PanelId, onRetry: () => void, onConnect: () => void, onAfterDeployed: () => void }): JSX.Element {
     switch(id) {
-        case PanelId.Session:
-          return <SessionPanel client={client} conf={conf} user={user} templates={templates} onRetry={restartAction}
+        case PanelId.Workspace:
+          return <WorkspacePanel client={client} conf={conf} user={user} onRetry={onRetry}
                     onStop={async () => {
-                        await client.deleteCurrentSession();
+                        await client.deleteCurrentWorkspace();
                     }}
                     onDeployed={async conf => {
-                        await client.createCurrentSession(conf);
-                        onDeployed();
+                        await client.createCurrentWorkspace(conf);
+                        onAfterDeployed();
                     }}
                     onConnect={onConnect} />;
         case PanelId.Stats:
           return <StatsPanel />;
         case PanelId.Admin:
           return <AdminPanel client={client} conf={conf} user={user} />;
-        default:
-            return <></>;
-    }
-}
-
-function ExtraTheiaNav({ session, restartAction }: { session: Session | null | undefined, restartAction: () => void }): JSX.Element {
-    if (session) {
-        const { pod, duration } = session;
-        if (pod.phase == 'Running') {
-            const remaining = duration * 60 - (pod.startTime || 0);
-            if (remaining < 300) { // 5 minutes
-                return (
-                    <Typography variant="h6">
-                        Your session is about to end. Make sure your changes have been exported.
-                    </Typography>
-                );
-            }
-        } else if (pod.phase == 'Failed') {
-            return (
-                <Typography variant="h6">
-                    Your session is over. <Button onClick={restartAction}>Restart it</Button>
-                </Typography>
-            );
-        }
+        case PanelId.Theia:
+          return <TheiaPanel client={client} autoDeploy={params.deploy} onMissingWorkspace={onRetry} onWorkspaceFailing={onRetry} onWorkspaceTimeout={onRetry} />;
     }
     return <></>;
 }
 
-function WrappedTheiaPanel({ params, conf, client, user, templates, selectPanel, restartAction, send }: { params: Params, client: Client, conf: Configuration, user: LoggedUser, templates: Record<string, Template>, selectPanel: (id: PanelId) => void, restartAction: () => void, send: (event: Events) => void }): JSX.Element {
-    const [session, setSession] = useState<Session | null | undefined>(undefined);
+function ExtraTheiaNav({ client, conf, restartAction }: { client: Client, conf: Configuration, restartAction: () => void }): JSX.Element {
+    const [workspace, setWorkspace] = useState<Workspace | null | undefined>(undefined);
 
     useInterval(async () => {
-        const session = await client.getCurrentSession();
-        setSession(session);
+        const workspace = await client.getCurrentWorkspace();
+        setWorkspace(workspace);
 
-        // Periodically extend duration of running sessions
-        if (session) {
-            const { pod, duration } = session;
-            if (pod && pod.phase == 'Running') {
-                const remaining = duration - (pod.startTime || 0) / 60; // In minutes
-                const maxDuration = conf.session.maxDuration;
-                // Increase session duration
-                if (remaining < 10 && duration < maxDuration) {
-                    const newDuration = Math.min(maxDuration, duration + 10);
-                    await client.updateCurrentSession({duration: newDuration});
+        // Periodically extend duration of running workspaces
+        if (workspace) {
+            const { state, maxDuration } = workspace;
+            if (state.tag == 'Running') {
+                const remaining = maxDuration - (state.startTime || 0) / 60; // In minutes
+                const maxConfDuration = conf.workspace.maxDuration;
+                // Increase workspace duration
+                if (remaining < 10 && maxDuration < maxConfDuration) {
+                    const newDuration = Math.min(maxConfDuration, maxDuration + 10);
+                    await client.updateCurrentWorkspace({duration: newDuration});
                 }
             }
         }
     }, 5000);
 
+    if (workspace) {
+        const { state, maxDuration } = workspace;
+        if (state.tag == 'Running') {
+            const remaining = maxDuration * 60 - (state.startTime || 0);
+            if (remaining < 300) { // 5 minutes
+                return (
+                    <Typography variant="h6">
+                        Your workspace is about to end. Make sure your changes have been exported.
+                    </Typography>
+                );
+            }
+        } else if (state.tag == 'Failed') {
+            return (
+                <Typography variant="h6">
+                    Your workspace is over. <Button onClick={restartAction}>Restart it</Button>
+                </Typography>
+            );
+        }
+    }
+
+    return <></>;
+}
+
+function restart(send: (event: Events) => void) { send(Events.RESTART)}
+
+function selectPanel(send: (event: Events, payload: Record<string, unknown>) => void, id: PanelId) { send(Events.SELECT, {panel: id})}
+
+function CustomNav({ client, send, state }: { client: Client, send: (event: Events) => void, state: State<Context, Event, SchemaType, Typestate> }): JSX.Element  {
+    const { panel } = state.context;
     return (
-        <Wrapper conf={conf} extraNav={<ExtraTheiaNav session={session} restartAction={restartAction} />} params={params} thin={true} onPlayground={() => selectPanel(PanelId.Session)} onAdminClick={() => selectPanel(PanelId.Admin)} onStatsClick={() => selectPanel(PanelId.Stats)} onLogout={() => send(Events.LOGOUT)} user={user}>
-            <TheiaPanel client={client} autoDeploy={params.deploy} templates={templates} onMissingSession={restartAction} onSessionFailing={restartAction} onSessionTimeout={restartAction} />
-        </Wrapper>
+        <Nav onPlayground={() => selectPanel(send, PanelId.Workspace)}>
+            <>
+            {state.matches(States.LOGGED)
+            ? <>
+                {(panel == PanelId.Theia) &&
+                <ExtraTheiaNav client={client} conf={state.context.conf} restartAction={() => restart(send)} />}
+                <div style={{display: "flex", alignItems: "center"}}>
+                    {hasAdminReadRights(state.context.user) &&
+                    <NavSecondMenuAdmin onAdminClick={() => selectPanel(send, PanelId.Admin)} onStatsClick={() => selectPanel(send, PanelId.Stats)} />}
+                    <NavMenuLogged conf={state.context.conf} user={state.context.user} onLogout={() => send(Events.LOGOUT)} />
+                </div>
+                </>
+                : <NavMenuUnlogged />}
+            </>
+        </Nav>
     );
 }
 
 function App({ params }: { params: Params }): JSX.Element {
     const client = new Client(params.base, 30000, {credentials: "include"});
     const { deploy } = params;
-    const [state, send] = useMachine(newMachine(client, deploy? PanelId.Theia: PanelId.Session), { devTools: true });
-    const { panel, templates, user, conf, error } = state.context;
+    const [state, send] = useMachine(newMachine(client, deploy? PanelId.Theia: PanelId.Workspace), { devTools: true });
+    const { panel, error } = state.context;
 
-    const restartAction = () => send(Events.RESTART);
-    const selectPanel = (id: PanelId) => send(Events.SELECT, {panel: id});
     const theme = createMuiTheme({
         palette: {
           type: 'dark',
@@ -107,22 +126,24 @@ function App({ params }: { params: Params }): JSX.Element {
     return (
         <ThemeProvider theme={theme}>
             <div style={{ display: "flex", width: "100vw", height: "100vh", alignItems: "center", justifyContent: "center" }}>
-                {isTheia
-                 ? <WrappedTheiaPanel client={client} conf={conf} params={params} user={user} templates={templates} selectPanel={selectPanel} restartAction={restartAction} send={send} />
-                 :
-                 <Wrapper conf={conf} params={params} onPlayground={() => selectPanel(PanelId.Session)} onAdminClick={() => selectPanel(PanelId.Admin)} onStatsClick={() => selectPanel(PanelId.Stats)} onLogout={() => send(Events.LOGOUT)} user={user}>
-                    {state.matches(States.LOGGED)
-                    ? <MainPanel client={client} conf={conf} user={user} id={panel} templates={templates} restartAction={restartAction} onDeployed={() => selectPanel(PanelId.Theia)} onConnect={() => selectPanel(PanelId.Theia)} />
-                    : state.matches(States.TERMS_UNAPPROVED)
-                        ? <TermsPanel terms={terms} onTermsApproved={() => send(Events.TERMS_APPROVAL)} />
-                        : state.matches(States.UNLOGGED)
-                        ? error
-                        ? <CenteredContainer>
-                            <ErrorMessage reason={error} action={restartAction} />
-                        </CenteredContainer>
-                        : <LoginPanel client={client} />
-                        : <LoadingPanel />}
-                </Wrapper>}
+                <Wrapper thin={isTheia}
+                         nav={<CustomNav client={client} send={send} state={state} />}
+                         params={params}>
+                   {state.matches(States.LOGGED)
+                   ? <MainPanel client={client} params={params} conf={state.context.conf} user={state.context.user} id={panel}
+                                onRetry={() => restart(send)}
+                                onAfterDeployed={() => selectPanel(send, PanelId.Theia)}
+                                onConnect={() => selectPanel(send, PanelId.Theia)} />
+                   : state.matches(States.TERMS_UNAPPROVED)
+                     ? <TermsPanel terms={terms} onTermsApproved={() => send(Events.TERMS_APPROVAL)} />
+                     : state.matches(States.UNLOGGED)
+                     ? error
+                     ? <CenteredContainer>
+                         <ErrorMessage reason={error} action={() => restart(send)} />
+                     </CenteredContainer>
+                     : <LoginPanel client={client} />
+                     : <LoadingPanel />}
+                </Wrapper>
             </div>
         </ThemeProvider>
     );

@@ -1,8 +1,8 @@
 import React, { useEffect, useRef, useState } from "react";
 import Paper from '@material-ui/core/Paper';
-import { Client, Template } from '@substrate/playground-client';
+import { Client } from '@substrate/playground-client';
 import { CenteredContainer, ErrorMessage, Loading } from '../components';
-import { fetchWithTimeout } from '../utils';
+import { fetchWithTimeout, workspaceUrl } from '../utils';
 
 interface Error {
     reason: string,
@@ -15,7 +15,7 @@ interface Loading {
     retry: number,
 }
 
-export function TheiaPanel({ client, autoDeploy, templates, onMissingSession, onSessionFailing, onSessionTimeout }: { client: Client, autoDeploy: string | null, templates: Record<string, Template>, onMissingSession: () => void, onSessionFailing: () => void, onSessionTimeout: () => void }): JSX.Element {
+export function TheiaPanel({ client, autoDeploy, onMissingWorkspace, onWorkspaceFailing, onWorkspaceTimeout }: { client: Client, autoDeploy: string | null, onMissingWorkspace: () => void, onWorkspaceFailing: () => void, onWorkspaceTimeout: () => void }): JSX.Element {
     const maxRetries = 5*60;
     const ref = useRef(null);
     const [error, setError] = useState<Error>();
@@ -23,83 +23,83 @@ export function TheiaPanel({ client, autoDeploy, templates, onMissingSession, on
     const [loading, setLoading] = useState<Loading>();
 
     useEffect(() => {
-        function createSession(template: string) {
-            client.createCurrentSession({template: template}).then(fetchData);
+        function createWorkspace(id: string): void {
+            client.createCurrentWorkspace({repositoryDetails: {id: id, reference: ""}}).then(fetchData);
         }
 
         async function fetchData() {
-            const session = await client.getCurrentSession();
-            if (session) {
-                const { pod } = session;
-                const phase = pod.phase;
-                if (phase == 'Running') {
+            const workspace = await client.getCurrentWorkspace();
+            if (workspace) {
+                const { state } = workspace;
+                if (state.tag == 'Running') {
                     // Check URL is fine
-                    const url = `//${session.url}`;
-                    if ((await fetchWithTimeout(url)).ok) {
-                        setUrl(url);
-                        return;
+                    const url = workspaceUrl(workspace);
+                    if (url) {
+                        if ((await fetchWithTimeout(url)).ok) {
+                            setUrl(url);
+                            return;
+                        }
+                    } else {
+
                     }
-                } else if (phase == 'Pending') {
-                    const { conditions, container } = pod;
-                    const reason = (conditions && conditions[0].reason) || container?.reason;
-                    if (reason === "Unschedulable" || reason === "CrashLoopBackOff" || reason === "ErrImagePull" || reason === "ImagePullBackOff" || reason === "InvalidImageName") {
-                        setError({reason: container?.message || (conditions && conditions[0].message) || 'Pod crashed',
-                                  action: onSessionFailing});
-                        return;
-                    }
-                    // The template is being deployed, nothing to do
+                } else if (state.tag == 'Failed') {
+                    const { reason } = state;
+                    setError({reason: reason || 'Pod crashed', action: onWorkspaceFailing});
                 }
+                // The repository is being deployed, nothing to do
             }
 
             const retry = loading?.retry ?? 0;
             if (retry < maxRetries) {
-                setLoading({phase: session?.pod.phase || 'Unknown', retry: retry + 1});
+                setLoading({phase: workspace?.state.tag || 'Unknown', retry: retry + 1});
                 setTimeout(fetchData, 1000);
             } else if (retry == maxRetries) {
-                setError({reason: "Couldn't access the theia session in time",
-                          action: onSessionTimeout});
+                setError({reason: "Couldn't access the theia workspace in time",
+                          action: onWorkspaceTimeout});
             }
         }
 
         // Entry point.
-        // If autoDeploy, first attempt to locate the associated template and deploy it.
+        // If autoDeploy, first attempt to locate the associated repository and deploy it.
         // In all cases, delegates to `fetchData`
         if (autoDeploy) {
-            if (!templates[autoDeploy]) {
-                setError({reason: `Unknown template ${autoDeploy}`,
-                          action: onMissingSession});
-                return;
-            }
+            client.getRepository(autoDeploy).then(repository => {
+                if (!repository) {
+                    setError({reason: `Unknown repository ${autoDeploy}`,
+                              action: onMissingWorkspace});
+                    return;
+                }
 
-            try {
-                client.getCurrentSession().then(session => {
-                    if (session) {
-                        setError({reason: "You can only have one active substrate playground session open at a time. \n Please close all other sessions to open a new one",
-                                  action: () => {
-                                      // Trigger current session deletion, wait for deletion then re-create a new one
-                                      return client.deleteCurrentSession()
-                                        .then(function() {
-                                            return new Promise<void>(function(resolve) {
-                                                const id = setInterval(async function() {
-                                                    const session = await client.getCurrentSession();
-                                                    if (!session) {
-                                                        clearInterval(id);
-                                                        resolve();
-                                                    }
-                                                }, 1000);
-                                            }
-                                        )})
-                                        .then(() => setError(undefined))
-                                        .then(() => createSession(autoDeploy));
-                                  },
-                                  actionTitle: "Replace existing session"});
-                    } else {
-                        createSession(autoDeploy);
-                    }
-                })
-            } catch {
-                setError({ reason: 'Error', action: onMissingSession});
-            }
+                try {
+                    client.getCurrentWorkspace().then(workspace => {
+                        if (workspace) {
+                            setError({reason: "You can only have one active substrate playground workspace open at a time. \n Please close all other workspaces to open a new one",
+                                      action: () => {
+                                          // Trigger current workspace deletion, wait for deletion then re-create a new one
+                                          return client.deleteCurrentWorkspace()
+                                            .then(function() {
+                                                return new Promise<void>(function(resolve) {
+                                                    const id = setInterval(async function() {
+                                                        const workspace = await client.getCurrentWorkspace();
+                                                        if (!workspace) {
+                                                            clearInterval(id);
+                                                            resolve();
+                                                        }
+                                                    }, 1000);
+                                                }
+                                            )})
+                                            .then(() => setError(undefined))
+                                            .then(() => createWorkspace(autoDeploy));
+                                      },
+                                      actionTitle: "Replace existing workspace"});
+                        } else {
+                            createWorkspace(autoDeploy);
+                        }
+                    })
+                } catch {
+                    setError({ reason: 'Error', action: onMissingWorkspace});
+                }
+            });
         } else {
             fetchData();
         }
