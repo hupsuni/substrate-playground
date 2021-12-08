@@ -51,7 +51,7 @@ metadata:
     app.kubernetes.io/part-of: ingress-nginx
 
 ---
-apiVersion: rbac.authorization.k8s.io/v1beta1
+apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRole
 metadata:
   name: nginx-ingress-clusterrole
@@ -92,8 +92,7 @@ rules:
       - create
       - patch
   - apiGroups:
-      - "extensions"
-      - "networking.k8s.io"
+      - networking.k8s.io
     resources:
       - ingresses
     verbs:
@@ -101,15 +100,22 @@ rules:
       - list
       - watch
   - apiGroups:
-      - "extensions"
-      - "networking.k8s.io"
+      - networking.k8s.io
     resources:
       - ingresses/status
     verbs:
       - update
+  - apiGroups:
+      - networking.k8s.io
+    resources:
+      - ingressclasses
+    verbs:
+      - get
+      - list
+      - watch
 
 ---
-apiVersion: rbac.authorization.k8s.io/v1beta1
+apiVersion: rbac.authorization.k8s.io/v1
 kind: Role
 metadata:
   name: nginx-ingress-role
@@ -154,7 +160,7 @@ rules:
       - get
 
 ---
-apiVersion: rbac.authorization.k8s.io/v1beta1
+apiVersion: rbac.authorization.k8s.io/v1
 kind: RoleBinding
 metadata:
   name: nginx-ingress-role-nisa-binding
@@ -172,7 +178,7 @@ subjects:
     namespace: ingress-nginx
 
 ---
-apiVersion: rbac.authorization.k8s.io/v1beta1
+apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRoleBinding
 metadata:
   name: nginx-ingress-clusterrole-nisa-binding
@@ -220,7 +226,7 @@ spec:
         kubernetes.io/os: linux
       containers:
         - name: nginx-ingress-controller
-          image: quay.io/kubernetes-ingress-controller/nginx-ingress-controller:0.30.0
+          image: quay.io/kubernetes-ingress-controller/nginx-ingress-controller:0.33.0
           args:
             - /nginx-ingress-controller
             - --configmap=$(POD_NAMESPACE)/nginx-configuration

@@ -45,7 +45,7 @@ GKE_CLUSTER=substrate-${PLAYGROUND_ID}
 
 # Derive CONTEXT from ENV
 ifeq ($(ENV), dev)
-  CONTEXT=docker-desktop
+  CONTEXT=minikube
 else
   CONTEXT=gke_${GKE_PROJECT}_${GKE_ZONE}_${GKE_CLUSTER}
 endif
@@ -111,9 +111,33 @@ build-template:
 	&& docker build --force-rm --build-arg BASE_TEMPLATE_VERSION=${BASE_TEMPLATE_VERSION} --build-arg TEMPLATE_IMAGE=${TAG} -t ${TAG_THEIA} -f Dockerfile.theia-template .
 	@rm -rf templates/${REPOSITORY_CLONE}
 
+build-openvscode-template:
+	@if test "$(TEMPLATE)" = "" ; then \
+		echo "Environment variable TEMPLATE not set"; \
+		exit 1; \
+	fi
+	$(eval BASE_TEMPLATE_VERSION=$(shell grep BASE_TEMPLATE_VERSION conf/templates/.env | cut -d '=' -f2))
+	$(eval REPOSITORY=$(shell cat conf/templates/${TEMPLATE} | yq -r .repository))
+	$(eval REF=$(shell cat conf/templates/${TEMPLATE} | yq -r .ref))
+	$(eval REPOSITORY_CLONE=.clone)
+	@cd templates; git clone https://github.com/${REPOSITORY}.git ${REPOSITORY_CLONE} \
+    && cd ${REPOSITORY_CLONE} \
+    && git checkout ${REF} \
+    $(eval REV = $(shell git rev-parse --short HEAD))
+
+	$(eval TAG=paritytech/substrate-playground-template-${TEMPLATE}:sha-${REV})
+	$(eval TAG_OPENVSCODE=paritytech/substrate-playground-template-${TEMPLATE}-openvscode:sha-${REV})
+	@cd templates; docker build --force-rm --build-arg BASE_TEMPLATE_VERSION=${BASE_TEMPLATE_VERSION} -t ${TAG} -f Dockerfile.template ${REPOSITORY_CLONE} \
+	&& docker build --force-rm --build-arg TEMPLATE_IMAGE=${TAG} -t ${TAG_OPENVSCODE} -f Dockerfile.openvscode-template .
+	@rm -rf templates/${REPOSITORY_CLONE}
+
 push-template: build-template
 	docker push ${TAG}
 	docker push ${TAG_THEIA}
+
+push-openvscode-template: build-openvscode-template
+	docker push ${TAG}
+	docker push ${TAG_OPENVSCODE}
 
 build-backend-docker-images: ## Build backend docker images
 	$(eval PLAYGROUND_DOCKER_IMAGE_VERSION=$(shell git rev-parse --short HEAD))
@@ -160,20 +184,23 @@ k8s-create-cluster: requires-env
         --release-channel regular \
         --zone us-central1-a \
         --node-locations us-central1-a \
-        --machine-type n2d-standard-8 \
-        --preemptible \
+        --machine-type n2d-standard-32 \
         --num-nodes 1
 
 k8s-setup-env: requires-k8s
-	# See https://cloud.google.com/compute/docs/machine-types
 	@read -p "GH client ID?" CLIENT_ID; \
 	read -p "GH client secret?" CLIENT_SECRET; \
 	kubectl create ns ${NAMESPACE} --dry-run=client -o yaml | kubectl apply -f - && \
-	kubectl create configmap playground-config --namespace=${NAMESPACE} --from-literal=github.clientId="$${CLIENT_ID}" --from-literal=workspace.baseImage="paritytech/base-ci:latest" --from-literal=workspace.defaultDuration="45" --from-literal=workspace.maxDuration="1440" --from-literal=workspace.defaultMaxPerNode="2" --from-literal=workspace.defaultPoolAffinity="default-workspace" --dry-run=client -o yaml | kubectl apply -f - && \
+	kubectl create configmap playground-config --namespace=${NAMESPACE} --from-literal=github.clientId="$${CLIENT_ID}" --from-literal=workspace.baseImage="paritytech/base-ci:latest" --from-literal=workspace.defaultDuration="45" --from-literal=workspace.maxDuration="1440" --from-literal=workspace.defaultMaxPerNode="6" --from-literal=workspace.defaultPoolAffinity="default-workspace" --dry-run=client -o yaml | kubectl apply -f - && \
 	kubectl create secret generic playground-secrets --namespace=${NAMESPACE} --from-literal=github.clientSecret="$${CLIENT_SECRET}" --from-literal=rocket.secretKey=`openssl rand -base64 32` --dry-run=client -o yaml | kubectl apply -f - && \
 	kubectl create configmap playground-templates --namespace=${NAMESPACE} --from-file=conf/k8s/overlays/${ENV}/templates/ --dry-run=client -o yaml | kubectl apply -f - && \
 	kubectl create configmap playground-users --namespace=${NAMESPACE} --from-file=conf/k8s/overlays/${ENV}/users/ --dry-run=client -o yaml | kubectl apply -f - && \
-	kubectl create configmap playground-repositories --namespace=${NAMESPACE} --dry-run=client -o yaml | kubectl apply -f -
+	kubectl create configmap playground-repositories --namespace=${NAMESPACE} --from-file=conf/k8s/overlays/${ENV}/repositories/ --dry-run=client -o yaml | kubectl apply -f -
+
+k8s-setup-conf: requires-k8s
+	@kubectl create configmap playground-templates --namespace=${NAMESPACE} --from-file=conf/k8s/overlays/${ENV}/templates/ --dry-run=client -o yaml | kubectl apply -f - && \
+	kubectl create configmap playground-users --namespace=${NAMESPACE} --from-file=conf/k8s/overlays/${ENV}/users/ --dry-run=client -o yaml | kubectl apply -f - && \
+	kubectl create configmap playground-repositories --namespace=${NAMESPACE} --from-file=conf/k8s/overlays/${ENV}/repositories/ --dry-run=client -o yaml | kubectl apply -f -
 
 k8s-cluster-status: requires-k8s
 	@kubectl get configmap playground-config &> /dev/null && [ $$? -eq 0 ] || (echo "Missing config 'playground-config'"; exit 1)
@@ -193,7 +220,7 @@ k8s-gke-static-ip: requires-k8s
 
 k8s-dev: requires-k8s
     # Adds required nodepool annotation, default on GKE
-	@kubectl label nodes docker-desktop cloud.google.com/gke-nodepool=default-workspace --overwrite
+	@kubectl label nodes ${CONTEXT} cloud.google.com/gke-nodepool=default-workspace --overwrite
 	@kubectl create ns ${NAMESPACE} --dry-run=client -o yaml | kubectl apply -f -
 	@cd conf/k8s; skaffold dev --cleanup=false
 

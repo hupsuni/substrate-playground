@@ -1,0 +1,48 @@
+# The image serving as base for openvscode templates.
+# Inherits from the 3rd party docker image and adds the relevant bits so that it can run openvscode
+#
+# Built as a multi-stage image (https://docs.docker.com/develop/develop-images/multistage-build/)
+
+ARG TEMPLATE_IMAGE
+
+FROM $TEMPLATE_IMAGE
+
+ARG OPENVSCODE_PLAYGROUND_HOME=$OPENVSCODE_HOME/openvscode-playground
+
+WORKDIR /home/
+
+USER root
+
+ENV OPENVSCODE_VERSION=1.63.0
+
+# Downloading the latest VSC Server release
+RUN wget https://github.com/gitpod-io/openvscode-server/releases/download/openvscode-server-v$OPENVSCODE_VERSION/openvscode-server-v$OPENVSCODE_VERSION-linux-x64.tar.gz \
+    && tar -xzf openvscode-server-v$OPENVSCODE_VERSION-linux-x64.tar.gz \
+    && mv openvscode-server-v$OPENVSCODE_VERSION-linux-x64 openvscode-server \
+    && rm -rf openvscode-server-v$OPENVSCODE_VERSION-linux-x64.tar.gz
+
+COPY playground-extension openvscode-server/extensions/playground-extension
+
+RUN chmod g+rw /home && \
+    chown -R playground:playground /home/openvscode-server && \
+    chown -R playground:playground /home/openvscode-server;
+
+USER playground
+
+## Install default extensions
+
+RUN /home/openvscode-server/server.sh --install-extension matklad.rust-analyzer \
+    --install-extension vsls-contrib.codetour \
+    --install-extension redhat.vscode-yaml
+
+WORKDIR /home/playground/workspace/
+
+ENV EDITOR=code
+ENV VISUAL=code
+ENV GIT_EDITOR="code --wait"
+
+EXPOSE 3000
+
+# https://github.com/Yelp/dumb-init
+ENTRYPOINT [ "dumb-init", "--" ]
+CMD [ "/home/openvscode-server/server.sh", "--port", "3000", "--folder", "/home/playground/workspace", "--disable-telemetry", "true", "--connectionToken", "1234"]

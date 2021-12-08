@@ -1,8 +1,10 @@
-import React, { useState } from "react";
+import React, { useEffect, useState } from "react";
 import ReactDOM from "react-dom";
 import { State } from "xstate";
+import Analytics from "analytics";
+import simpleAnalyticsPlugin from "analytics-plugin-simple-analytics";
 import { Client, Configuration, LoggedUser, Workspace } from '@substrate/playground-client';
-import { createMuiTheme, ThemeProvider } from '@material-ui/core/styles';
+import { createTheme, ThemeProvider } from '@material-ui/core/styles';
 import Button from "@material-ui/core/Button";
 import Typography from "@material-ui/core/Typography";
 import { useMachine } from '@xstate/react';
@@ -17,8 +19,11 @@ import { TheiaPanel } from './panels/theia';
 import { WorkspacePanel } from './panels/workspace';
 import { terms } from "./terms";
 import { hasAdminReadRights } from "./utils";
+import { SubstrateLight, SubstrateDark } from './themes';
+import LogoSubstrate from "./LogoSubstrate";
+import { CssBaseline } from "@material-ui/core";
 
-function MainPanel({ client, params, conf, user, id, onRetry, onConnect, onAfterDeployed }: { client: Client, params: Params, conf: Configuration, user?: LoggedUser, id: PanelId, onRetry: () => void, onConnect: () => void, onAfterDeployed: () => void }): JSX.Element {
+function MainPanel({ client, params, conf, user, id, templates, onRetry, onConnect, onAfterDeployed }: { client: Client, params: Params, conf: Configuration, user?: LoggedUser, id: PanelId, onRetry: () => void, onConnect: () => void, onAfterDeployed: () => void }): JSX.Element {
     switch(id) {
         case PanelId.Workspace:
           return <WorkspacePanel client={client} conf={conf} user={user} onRetry={onRetry}
@@ -110,27 +115,45 @@ function CustomNav({ client, send, state }: { client: Client, send: (event: Even
     );
 }
 
+const theme = createTheme(SubstrateLight);
+
 function App({ params }: { params: Params }): JSX.Element {
     const client = new Client(params.base, 30000, {credentials: "include"});
     const { deploy } = params;
     const [state, send] = useMachine(newMachine(client, deploy? PanelId.Theia: PanelId.Workspace), { devTools: true });
-    const { panel, error } = state.context;
+    const { panel, templates, error } = state.context;
 
-    const theme = createMuiTheme({
+    /*const theme = createTheme({
         palette: {
-          type: 'dark',
+          type: 'light',
+          primary: {
+            main: 'rgba(38,224,162, 1)',
+          },
+          secondary: {
+            main: 'rgb(0, 255, 0)',
+          },
         },
-    });
+    });*/
 
     const isTheia = state.matches(States.LOGGED) && panel == PanelId.Theia;
+
+    useEffect(() => {
+        // Remove transient parameters when logged, to prevent recursive behaviors
+        if (state.matches(States.LOGGED)) {
+            removeTransientsURLParams();
+        }
+    }, [state]);
+
+
     return (
         <ThemeProvider theme={theme}>
+            <CssBaseline />
             <div style={{ display: "flex", width: "100vw", height: "100vh", alignItems: "center", justifyContent: "center" }}>
                 <Wrapper thin={isTheia}
                          nav={<CustomNav client={client} send={send} state={state} />}
                          params={params}>
                    {state.matches(States.LOGGED)
-                   ? <MainPanel client={client} params={params} conf={state.context.conf} user={state.context.user} id={panel}
+                   ? <MainPanel client={client} params={params} templates={templates} conf={state.context.conf} user={state.context.user} id={panel}
                                 onRetry={() => restart(send)}
                                 onAfterDeployed={() => selectPanel(send, PanelId.Theia)}
                                 onConnect={() => selectPanel(send, PanelId.Theia)} />
@@ -158,14 +181,19 @@ export interface Params {
 function extractParams(): Params {
     const params = new URLSearchParams(window.location.search);
     const deploy = params.get('deploy');
+    return {deploy: deploy,
+            version: process.env.GITHUB_SHA,
+            base: process.env.BASE || "/api"};
+}
+
+function removeTransientsURLParams() {
+    const params = new URLSearchParams(window.location.search);
+    const deploy = params.get('deploy');
     if (deploy) {
         params.delete('deploy');
         const paramsStr = params.toString();
         window.history.replaceState({}, '', `${location.pathname}${paramsStr != "" ? params : ""}`);
     }
-    return {deploy: deploy,
-            version: process.env.GITHUB_SHA,
-            base: process.env.BASE || "/api"};
 }
 
 function main(): void {
@@ -174,6 +202,13 @@ function main(): void {
     if (members.length > 1) {
       document.domain = members.slice(members.length-2).join(".");
     }
+
+    const analytics = Analytics({
+        app: "substrate-playground",
+        plugins: [
+          simpleAnalyticsPlugin(),
+        ]
+    });
 
     ReactDOM.render(
         <App params={extractParams()} />,

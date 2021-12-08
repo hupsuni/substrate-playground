@@ -1,20 +1,19 @@
 //! Helper methods ton interact with k8s
-use crate::{
-    error::{Error, Result},
-    kubernetes_utils::{
+use crate::{error::{self, Error, Result}, kubernetes_utils::{
         add_config_map_value, client, config, delete_config_map_value, env_var, get_config_map,
         ingress_path, list_by_selector,
-    },
-    types::{
-        self, Configuration, Environment, LoggedUser, Pool, Port, Repository,
-        RepositoryConfiguration, RepositoryDetails, RepositoryRuntimeConfiguration,
-        RepositoryUpdateConfiguration, RepositoryVersion, RepositoryVersionConfiguration, User,
-        UserConfiguration, UserUpdateConfiguration, Workspace, WorkspaceConfiguration,
-        WorkspaceDefaults, WorkspaceState, WorkspaceUpdateConfiguration,
-    },
-};
+    }, types::{self, Configuration, Environment, LoggedUser, NameValuePair, Pool, Port, Repository, RepositoryConfiguration, RepositoryDetails, RepositoryRuntimeConfiguration, RepositoryUpdateConfiguration, RepositoryVersion, RepositoryVersionConfiguration, RepositoryVersionState, Template, User, UserConfiguration, UserUpdateConfiguration, Workspace, WorkspaceConfiguration, WorkspaceDefaults, WorkspaceState, WorkspaceUpdateConfiguration}};
 use json_patch::{AddOperation, PatchOperation};
-use k8s_openapi::api::{batch::v1::{Job, JobSpec}, core::v1::{Affinity, Container, EnvVar, Node, NodeAffinity, NodeSelectorRequirement, NodeSelectorTerm, PersistentVolumeClaim, PersistentVolumeClaimSpec, PersistentVolumeClaimVolumeSource, Pod, PodSpec, PodTemplateSpec, PreferredSchedulingTerm, ResourceRequirements, Service, ServicePort, ServiceSpec, TypedLocalObjectReference, Volume, VolumeMount}, extensions::v1beta1::{HTTPIngressPath, HTTPIngressRuleValue, Ingress, IngressRule}};
+use k8s_openapi::api::{
+    batch::v1::{Job, JobSpec},
+    core::v1::{
+        Affinity, Container, EnvVar, Node, NodeAffinity, NodeSelectorRequirement, NodeSelectorTerm,
+        PersistentVolumeClaim, PersistentVolumeClaimSpec, PersistentVolumeClaimVolumeSource, Pod,
+        PodSpec, PodTemplateSpec, PreferredSchedulingTerm, ResourceRequirements, Service,
+        ServicePort, ServiceSpec, TypedLocalObjectReference, Volume, VolumeMount,
+    },
+    networking::v1::{HTTPIngressPath, HTTPIngressRuleValue, Ingress, IngressRule},
+};
 use k8s_openapi::apimachinery::pkg::{
     api::resource::Quantity, apis::meta::v1::ObjectMeta, util::intstr::IntOrString,
 };
@@ -22,16 +21,11 @@ use kube::{
     api::{Api, DeleteParams, ListParams, Patch, PatchParams, PostParams},
     Client, Resource,
 };
-use log::error;
+
 use serde::Serialize;
 use serde_json::json;
-use std::{
-    collections::BTreeMap,
-    convert::TryFrom,
-    env,
-    num::ParseIntError,
-    time::Duration,
-};
+use log::error;
+use std::{collections::BTreeMap, convert::TryFrom, env, num::ParseIntError, time::Duration};
 
 const NODE_POOL_LABEL: &str = "cloud.google.com/gke-nodepool";
 const INSTANCE_TYPE_LABEL: &str = "node.kubernetes.io/instance-type";
@@ -45,6 +39,7 @@ const INGRESS_NAME: &str = "ingress";
 const WORKSPACE_DURATION_ANNOTATION: &str = "playground.substrate.io/workspace_duration";
 const USERS_CONFIG_MAP: &str = "playground-users";
 const REPOSITORIES_CONFIG_MAP: &str = "playground-repositories";
+const TEMPLATES_CONFIG_MAP: &str = "playground-templates";
 const THEIA_WEB_PORT: i32 = 3000;
 
 pub fn pod_name(user: &str) -> String {
@@ -115,6 +110,8 @@ fn volume_template_name(repository_id: &str) -> String {
     format!("workspace-template-{}", repository_id)
 }
 
+// A volume claim created from a snapshot
+// https://kubernetes.io/docs/concepts/storage/persistent-volumes/#volume-snapshot-and-restore-volume-from-snapshot-support
 fn volume(workspace_id: &str, repository_id: &str) -> PersistentVolumeClaim {
     let mut labels = BTreeMap::new();
     labels.insert(APP_LABEL.to_string(), APP_VALUE.to_string());
@@ -127,25 +124,68 @@ fn volume(workspace_id: &str, repository_id: &str) -> PersistentVolumeClaim {
     PersistentVolumeClaim {
         metadata: ObjectMeta {
             name: Some(volume_name(workspace_id, repository_id)),
-            labels,
+            labels: Some(labels),
             ..Default::default()
         },
         spec: Some(PersistentVolumeClaimSpec {
-            access_modes: vec!["ReadWriteOnce".to_string()],
+            access_modes: Some(vec!["ReadWriteOnce".to_string()]),
             resources: Some(ResourceRequirements {
-                requests,
+                requests: Some(requests),
                 ..Default::default()
             }),
             data_source: Some(TypedLocalObjectReference {
                 api_group: Some("snapshot.storage.k8s.io".to_string()),
                 kind: "PersistentVolumeClaim".to_string(),
                 name: volume_template_name(repository_id),
+            }),
+            ..Default::default()
+        }),
+        ..Default::default()
+    }
+}
+
+fn volume_template(repository_id: &str) -> PersistentVolumeClaim {
+    let mut labels = BTreeMap::new();
+    labels.insert(APP_LABEL.to_string(), APP_VALUE.to_string());
+    labels.insert(COMPONENT_LABEL.to_string(), COMPONENT_VALUE.to_string());
+
+    let mut requests = BTreeMap::new();
+    requests.insert("storage".to_string(), Quantity("5Gi".to_string()));
+
+    PersistentVolumeClaim {
+        metadata: ObjectMeta {
+            name: Some(volume_template_name(repository_id)),
+            labels: Some(labels),
+            ..Default::default()
+        },
+        spec: Some(PersistentVolumeClaimSpec {
+            access_modes: Some(vec!["ReadWriteOnce".to_string()]),
+            resources: Some(ResourceRequirements {
+                requests: Some(requests),
                 ..Default::default()
             }),
             ..Default::default()
         }),
         ..Default::default()
     }
+}
+
+fn running_or_pending_workspaces(workspaces: Vec<Workspace>) -> Vec<Workspace> {
+    workspaces
+        .into_iter()
+        .filter(|workspace| match &workspace.state {
+            WorkspaceState::Running { .. } | WorkspaceState::Deploying => true,
+            _ => false,
+        })
+        .collect()
+}
+async fn create_volume_template(
+    api: &Api<PersistentVolumeClaim>,
+    repository_id: &str,
+) -> Result<PersistentVolumeClaim> {
+    api.create(&PostParams::default(), &volume_template(repository_id))
+        .await
+        .map_err(|err| Error::Failure(err.into()))
 }
 
 async fn get_or_create_volume(
@@ -181,26 +221,26 @@ fn create_pod(
     Ok(Pod {
         metadata: ObjectMeta {
             name: Some(pod_name(workspace_id)),
-            labels,
-            annotations: create_pod_annotations(duration)?,
+            labels: Some(labels),
+            annotations: Some(create_pod_annotations(duration)?),
             ..Default::default()
         },
         spec: Some(PodSpec {
             affinity: Some(Affinity {
                 node_affinity: Some(NodeAffinity {
-                    preferred_during_scheduling_ignored_during_execution: vec![
+                    preferred_during_scheduling_ignored_during_execution: Some(vec![
                         PreferredSchedulingTerm {
                             weight: 100,
                             preference: NodeSelectorTerm {
-                                match_expressions: vec![NodeSelectorRequirement {
+                                match_expressions: Some(vec![NodeSelectorRequirement {
                                     key: NODE_POOL_LABEL.to_string(),
                                     operator: "In".to_string(),
-                                    values: vec![pool_id.to_string()],
-                                }],
+                                    values: Some(vec![pool_id.to_string()]),
+                                }]),
                                 ..Default::default()
                             },
                         },
-                    ],
+                    ]),
                     ..Default::default()
                 }),
                 ..Default::default()
@@ -211,18 +251,18 @@ fn create_pod(
                     runtime
                         .clone()
                         .base_image
-                        .unwrap_or(conf.workspace.base_image.clone()),
+                        .unwrap_or_else(|| conf.workspace.base_image.clone()),
                 ),
-                env: pod_env_variables(runtime, &env.host, workspace_id),
-                volume_mounts: vec![VolumeMount {
+                env: Some(pod_env_variables(runtime, &env.host, workspace_id)),
+                volume_mounts: Some(vec![VolumeMount {
                     name: volume_name.clone(),
                     mount_path: "/workspace".to_string(),
                     ..Default::default()
-                }],
+                }]),
                 ..Default::default()
             }],
             termination_grace_period_seconds: Some(1),
-            volumes: vec![Volume {
+            volumes: Some(vec![Volume {
                 name: volume_name,
                 persistent_volume_claim: Some(PersistentVolumeClaimVolumeSource {
                     claim_name: volume
@@ -233,7 +273,7 @@ fn create_pod(
                     ..Default::default()
                 }),
                 ..Default::default()
-            }],
+            }]),
             ..Default::default()
         }),
         ..Default::default()
@@ -273,20 +313,20 @@ fn create_service(workspace_id: &str, runtime: &RepositoryRuntimeConfiguration) 
     Service {
         metadata: ObjectMeta {
             name: Some(service_name(workspace_id)),
-            labels,
+            labels: Some(labels),
             ..Default::default()
         },
         spec: Some(ServiceSpec {
             type_: Some("NodePort".to_string()),
-            selector,
-            ports,
+            selector: Some(selector),
+            ports: Some(ports),
             ..Default::default()
         }),
         ..Default::default()
     }
 }
 
-fn ingress_paths(service_name: String, ports: &Vec<Port>) -> Vec<HTTPIngressPath> {
+fn ingress_paths(service_name: String, ports: &[Port]) -> Vec<HTTPIngressPath> {
     let mut all_paths = vec![ingress_path("/", &service_name, THEIA_WEB_PORT)];
     let mut paths = ports
         .iter()
@@ -298,6 +338,10 @@ fn ingress_paths(service_name: String, ports: &Vec<Port>) -> Vec<HTTPIngressPath
 
 fn subdomain(host: &str, workspace_id: &str) -> String {
     format!("{}.{}", workspace_id, host)
+}
+
+async fn get_templates(client: Client, namespace: &str) -> Result<BTreeMap<String, String>> {
+    get_config_map(client, namespace, TEMPLATES_CONFIG_MAP).await
 }
 
 async fn list_users(client: Client, namespace: &str) -> Result<BTreeMap<String, String>> {
@@ -334,11 +378,11 @@ impl Engine {
         let client = Client::try_from(config).map_err(|err| Error::Failure(err.into()))?;
         let ingress_api: Api<Ingress> = Api::namespaced(client.clone(), &namespace);
         let secured = if let Ok(ingress) = ingress_api.get(INGRESS_NAME).await {
-            !ingress
+            ingress
                 .spec
                 .ok_or(Error::MissingData("spec"))?
                 .tls
-                .is_empty()
+                .is_some()
         } else {
             false
         };
@@ -348,6 +392,7 @@ impl Engine {
                 .spec
                 .ok_or(Error::MissingData("spec"))?
                 .rules
+                .unwrap_or_default()
                 .first()
                 .ok_or(Error::MissingData("spec#rules[0]"))?
                 .host
@@ -395,10 +440,8 @@ impl Engine {
         let node = nodes
             .first()
             .ok_or(Error::MissingData("empty vec of nodes"))?;
-        let labels = node
-            .metadata
-            .labels
-            .clone();
+        let metadata = node.metadata.clone();
+        let labels = metadata.labels.unwrap_or_default();
         let local = "local".to_string();
         let unknown = "unknown".to_string();
         let instance_type = labels.get(INSTANCE_TYPE_LABEL).unwrap_or(&local);
@@ -411,8 +454,9 @@ impl Engine {
                 .map(|node| crate::types::Node {
                     hostname: node
                         .metadata
-                        .labels
                         .clone()
+                        .labels
+                        .unwrap_or_default()
                         .get(HOSTNAME_LABEL)
                         .unwrap_or(&unknown)
                         .clone(),
@@ -490,6 +534,23 @@ impl Engine {
 
     fn yaml_to_user(self, s: &str) -> Result<User> {
         serde_yaml::from_str(s).map_err(|err| Error::Failure(err.into()))
+    }
+
+    pub async fn list_templates(self) -> Result<BTreeMap<String, Template>> {
+        let client = client().await?;
+
+        Ok(get_templates(client, &self.env.namespace)
+            .await?
+            .into_iter()
+            .filter_map(|(k, v)| {
+                if let Ok(template) = serde_yaml::from_str(&v) {
+                    Some((k, template))
+                } else {
+                    error!("Error while parsing template {}", k);
+                    None
+                }
+            })
+            .collect::<BTreeMap<String, Template>>())
     }
 
     pub async fn get_user(&self, id: &str) -> Result<Option<User>> {
@@ -591,16 +652,11 @@ impl Engine {
 
     // Creates a Workspace from a Pod annotations
     fn pod_to_workspace(pod: &Pod) -> Result<Workspace> {
-        let labels = pod
-            .metadata
-            .labels
-            .clone();
+        let metadata = pod.metadata.clone();
+        let labels = metadata.labels.unwrap_or_default();
         let unknown = "UNKNOWN OWNER".to_string();
         let username = labels.get(OWNER_LABEL).unwrap_or(&unknown);
-        let annotations = &pod
-            .metadata
-            .annotations
-            .clone();
+        let annotations = &metadata.annotations.unwrap_or_default();
         let max_duration = str_minutes_to_duration(
             annotations
                 .get(WORKSPACE_DURATION_ANNOTATION)
@@ -687,11 +743,8 @@ impl Engine {
         let mut spec = ingress
             .clone()
             .spec
-            .ok_or(Error::MissingData("ingress#spec"))?
-            .clone();
-        let mut rules: Vec<IngressRule> = spec
-            .clone()
-            .rules;
+            .ok_or(Error::MissingData("ingress#spec"))?;
+        let mut rules: Vec<IngressRule> = spec.rules.unwrap_or_default();
         for (workspace_id, ports) in runtimes {
             let subdomain = subdomain(&self.env.host, &workspace_id);
             rules.push(IngressRule {
@@ -701,7 +754,7 @@ impl Engine {
                 }),
             });
         }
-        spec.rules = rules;
+        spec.rules = Some(rules);
         ingress.spec.replace(spec);
 
         ingress_api
@@ -742,7 +795,7 @@ impl Engine {
         let max_workspaces_allowed =
             pool.nodes.len() * self.configuration.workspace.max_workspaces_per_pod;
         let workspaces = self.list_workspaces().await?;
-        if workspaces.len() >= max_workspaces_allowed {
+        if running_or_pending_workspaces(workspaces).len() >= max_workspaces_allowed {
             // TODO Should trigger pool dynamic scalability. Right now this will only consider the pool lower bound.
             // "Reached maximum number of concurrent workspaces allowed: {}"
             return Err(Error::Unauthorized());
@@ -762,7 +815,7 @@ impl Engine {
         };
 
         let volume_api: Api<PersistentVolumeClaim> = Api::namespaced(client.clone(), namespace);
-        // TODO use conf.version to access right workspace
+        // TODO use conf.version to access right volume
         let volume =
             get_or_create_volume(&volume_api, user_id, &conf.repository_details.id).await?;
 
@@ -878,10 +931,11 @@ impl Engine {
         let rules: Vec<IngressRule> = spec
             .clone()
             .rules
+            .unwrap_or_default()
             .into_iter()
             .filter(|rule| rule.clone().host.unwrap_or_else(|| "unknown".to_string()) != subdomain)
             .collect();
-        spec.rules = rules;
+        spec.rules = Some(rules);
         ingress.spec.replace(spec);
 
         ingress_api
@@ -917,7 +971,7 @@ impl Engine {
             get_config_map(client, &self.env.namespace, REPOSITORIES_CONFIG_MAP)
                 .await?
                 .into_iter()
-                .map(|(k, v)| {
+                .map(|(_k, v)| {
                     Ok(serde_yaml::from_str::<Repository>(&v)
                         .map_err(|err| Error::Failure(err.into()))?)
                 })
@@ -983,15 +1037,43 @@ impl Engine {
         id: &str,
     ) -> Result<Option<RepositoryVersion>> {
         // TODO
-        Ok(None)
+        Ok(Some(RepositoryVersion {
+            reference: "".to_string(),
+            state: RepositoryVersionState::Ready {
+                runtime: RepositoryRuntimeConfiguration {
+                    base_image: None,
+                    env: None,
+                    ports: None,
+                },
+            },
+        }))
     }
 
     pub async fn list_repository_versions(
         &self,
         repository_id: &str,
     ) -> Result<Vec<RepositoryVersion>> {
-        // TODO
-        Ok(vec![])
+        // TODO list volume template
+        Ok(vec![RepositoryVersion {
+            reference: "yo".to_string(),
+            state: RepositoryVersionState::Building {
+                runtime: RepositoryRuntimeConfiguration {
+                    base_image: Some("base".to_string()),
+                    env: Some(vec![NameValuePair {
+                        name: "name".to_string(),
+                        value: "value".to_string(),
+                    }]),
+                    ports: Some(vec![Port {
+                        name: "name".to_string(),
+                        path: "path".to_string(),
+                        port: 55,
+                        protocol: Some("TCP".to_string()),
+                        target: Some(55),
+                    }]),
+                },
+                progress: 50,
+            },
+        }])
     }
 
     pub async fn create_repository_version(
@@ -1000,59 +1082,73 @@ impl Engine {
         id: &str,
         conf: RepositoryVersionConfiguration,
     ) -> Result<()> {
-    let client = client().await?;
-    let job_api: Api<Job> = Api::namespaced(client.clone(), &self.env.namespace);
-    let job = Job {
-        metadata: ObjectMeta {
-            name: Some("aa".to_string()),
-            ..Default::default()
-        },
-        spec: Some(JobSpec {
-            ttl_seconds_after_finished: Some(0),
-            backoff_limit: Some(1),
-            template: PodTemplateSpec {
-                spec: Some(PodSpec {
-                    containers: vec![Container {
-                        name: "cloner".to_string(),
-                        image: Some("paritytech/substrate-playground-backend-api:latest".to_string()),
-                        command: vec!["builder".to_string()],
-                        env: vec![EnvVar {
-                            name: "".to_string(),
-                            value: Some("".to_string()),
+        let client = client().await?;
+
+        let namespace = &self.env.namespace;
+        // Create volume
+        let volume_api: Api<PersistentVolumeClaim> = Api::namespaced(client.clone(), namespace);
+        let volume = create_volume_template(&volume_api, &repository_id).await?;
+
+        let job_api: Api<Job> = Api::namespaced(client.clone(), &self.env.namespace);
+        let job = Job {
+            metadata: ObjectMeta {
+                name: Some(format!(
+                    "builder-{}-{}",
+                    repository_id.to_string(),
+                    id.to_string()
+                )),
+                ..Default::default()
+            },
+            spec: Some(JobSpec {
+                ttl_seconds_after_finished: Some(0),
+                backoff_limit: Some(1),
+                template: PodTemplateSpec {
+                    spec: Some(PodSpec {
+                        volumes: Some(vec![Volume {
+                            name: volume_template_name(repository_id),
+                            persistent_volume_claim: Some(PersistentVolumeClaimVolumeSource {
+                                claim_name: volume
+                                    .meta()
+                                    .clone()
+                                    .name
+                                    .ok_or(Error::MissingData("meta#name"))?,
+                                ..Default::default()
+                            }),
+                            ..Default::default()
+                        }]),
+                        restart_policy: Some("OnFailure".to_string()),
+                        containers: vec![Container {
+                            name: "builder".to_string(),
+                            image: Some(
+                                "paritytech/substrate-playground-backend-api:latest".to_string(),
+                            ),
+                            command: Some(vec!["builder".to_string()]),
+                            env: Some(vec![EnvVar {
+                                // ID, URL, REFERENCE
+                                // Changes persisted on disk
+                                name: "REFERENCE".to_string(),
+                                value: Some(conf.reference),
+                                ..Default::default()
+                            }]),
+                            volume_mounts: Some(vec![VolumeMount {
+                                name: volume_template_name(repository_id),
+                                mount_path: "/".to_string(),
+                                ..Default::default()
+                            }]),
                             ..Default::default()
                         }],
                         ..Default::default()
-                    }],
+                    }),
                     ..Default::default()
-                }),
+                },
                 ..Default::default()
-            },
+            }),
             ..Default::default()
-        }),
-        ..Default::default()
-    };
-    job_api
-        .create(&PostParams::default(), &job)
-        .await
-        .map_err(|err| Error::Failure(err.into()))?;
-
-/*
-apiVersion: batch/v1
-kind: Job
-metadata:
-  name: pi
-spec:
-  ttlSecondsAfterFinished: 100
-  template:
-    spec:
-      containers:
-      - name: pi
-        image: perl
-        command: ["perl",  "-Mbignum=bpi", "-wle", "print bpi(2000)"]
-      restartPolicy: Never
-  backoffLimit: 4
-
-*/
+        };
+        job_api
+            .create(&PostParams::default(), &job)
+            .await
+            .map_err(|err| Error::Failure(err.into()))?;
 
         Ok(())
     }
@@ -1088,19 +1184,16 @@ spec:
         let default = "default".to_string();
         let nodes_by_pool: BTreeMap<String, Vec<Node>> =
             nodes.iter().fold(BTreeMap::new(), |mut acc, node| {
-                if let labels = node.metadata.labels.clone() {
-                    let key = labels.get(NODE_POOL_LABEL).unwrap_or(&default);
-                    let nodes = acc.entry(key.clone()).or_insert_with(Vec::new);
-                    nodes.push(node.clone());
-                } else {
-                    error!("No labels");
-                }
+                let labels = node.metadata.labels.clone().unwrap_or_default();
+                let key = labels.get(NODE_POOL_LABEL).unwrap_or(&default);
+                let nodes = acc.entry(key.clone()).or_insert_with(Vec::new);
+                nodes.push(node.clone());
                 acc
             });
 
         Ok(nodes_by_pool
             .into_iter()
-            .flat_map(|(s, v)| match self.clone().nodes_to_pool(s.clone(), v) {
+            .flat_map(|(s, v)| match self.clone().nodes_to_pool(s, v) {
                 Ok(pool) => Some(pool),
                 Err(_) => None,
             })

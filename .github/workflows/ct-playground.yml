@@ -35,11 +35,11 @@ jobs:
           ENV: ${{ matrix.env }}
 
       - name: Audit URLs using Lighthouse
-        uses: treosh/lighthouse-ci-action@7.0.0
+        uses: treosh/lighthouse-ci-action@8.0.0
         with:
           urls: https://${{ steps.env.outputs.domain }}.substrate.dev/
 
-      - uses: microsoft/playwright-github-action@v1.4.4
+      - uses: microsoft/playwright-github-action@v1.5.0
 
       - name: Run tests
         run: yarn && yarn test

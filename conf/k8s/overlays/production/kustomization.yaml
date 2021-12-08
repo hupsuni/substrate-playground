@@ -10,9 +10,9 @@ resources:
 
 images:
 - name: paritytech/substrate-playground-backend-api
-  newTag: sha-a5785a0
+  newTag: sha-cd607960
 - name: paritytech/substrate-playground-backend-ui
-  newTag: sha-a5785a0
+  newTag: sha-cd607960
 
 patches:
 - patch: |-
@@ -35,7 +35,7 @@ patchesStrategicMerge:
   spec:
     loadBalancerIP: 34.67.124.32
 - |-
-  apiVersion: networking.k8s.io/v1beta1
+  apiVersion: networking.k8s.io/v1
   kind: Ingress
   metadata:
     name: ingress

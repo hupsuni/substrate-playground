@@ -81,7 +81,7 @@ impl Manager {
                                 match workspace.state {
                                     WorkspaceState::Running { start_time, .. } => {
                                         workspaces2.remove(&workspace.user_id);
-                                        if let Some(duration) = start_time.elapsed().ok() {
+                                        if let Ok(duration) = start_time.elapsed() {
                                             self.clone()
                                                 .metrics
                                                 .observe_deploy_duration(duration.as_secs_f64());
@@ -158,7 +158,9 @@ fn workspace_id(id: &str) -> String {
 
 impl Manager {
     pub fn get(self, user: LoggedUser) -> Result<Playground> {
+        let templates = new_runtime()?.block_on(self.clone().engine.list_templates())?;
         Ok(Playground {
+            templates,
             user: Some(user),
             env: self.engine.env,
             configuration: self.engine.configuration,
@@ -166,7 +168,9 @@ impl Manager {
     }
 
     pub fn get_unlogged(&self) -> Result<Playground> {
+        let templates = new_runtime()?.block_on(self.clone().engine.list_templates())?;
         Ok(Playground {
+            templates,
             user: None,
             env: self.clone().engine.env,
             configuration: self.clone().engine.configuration,
@@ -223,7 +227,7 @@ impl Manager {
     // Workspaces
 
     pub fn get_workspace(&self, user: &LoggedUser, id: &str) -> Result<Option<Workspace>> {
-        if user.id != id && !user.has_admin_read_rights() {
+        if workspace_id(&user.id) != id && !user.has_admin_read_rights() {
             return Err(Error::Unauthorized());
         }
 
@@ -244,7 +248,8 @@ impl Manager {
         id: &str,
         conf: WorkspaceConfiguration,
     ) -> Result<()> {
-        if user.id != id && !user.has_admin_edit_rights() {
+        // Id can only be customized by users with proper rights
+        if workspace_id(&user.id) != id && !user.has_admin_edit_rights() {
             return Err(Error::Unauthorized());
         }
 
@@ -262,7 +267,8 @@ impl Manager {
         }
 
         let workspace_id = workspace_id(id);
-        if self.get_workspace(user, &workspace_id)?.is_some() {
+        // Ensure a workspace with the same id is not alread running
+        if new_runtime()?.block_on(self.engine.get_workspace(&workspace_id))?.is_some() {
             return Err(Error::Unauthorized());
         }
 
@@ -295,7 +301,7 @@ impl Manager {
     ) -> Result<()> {
         if conf.duration.is_some() {
             // Duration can only customized by users with proper rights
-            if id != user.id && !user.can_customize_duration() {
+            if workspace_id(&user.id) != id && !user.can_customize_duration() {
                 return Err(Error::Unauthorized());
             }
         }
@@ -304,7 +310,7 @@ impl Manager {
     }
 
     pub fn delete_workspace(&self, user: &LoggedUser, id: &str) -> Result<()> {
-        if user.id != id && !user.has_admin_edit_rights() {
+        if workspace_id(&user.id) != id && !user.has_admin_edit_rights() {
             return Err(Error::Unauthorized());
         }
 
